@@ -162,19 +162,19 @@ public class OrderedPendingList implements PendingList {
     @Override
     public boolean contains(MessageReference message) {
         if (message != null) {
-            for (PendingNode value : map.values()) {
-                if (value.getMessage().equals(message)) {
-                    return true;
-                }
-            }
+            return this.map.containsKey(message.getMessageId());
         }
         return false;
     }
 
     @Override
     public Collection<MessageReference> values() {
+        return getValues(this);
+    }
+
+    public static Collection<MessageReference> getValues(final PendingList pendingList) {
         List<MessageReference> messageReferences = new ArrayList<MessageReference>();
-        Iterator<MessageReference> iterator = iterator();
+        Iterator<MessageReference> iterator = pendingList.iterator();
         while (iterator.hasNext()) {
             messageReferences.add(iterator.next());
         }
@@ -198,4 +198,31 @@ public class OrderedPendingList implements PendingList {
         }
         return null;
     }
+
+    public void insertAtHead(List<MessageReference> list) {
+        if (list != null && !list.isEmpty()) {
+            PendingNode newHead = null;
+            PendingNode appendNode = null;
+            for (MessageReference ref : list) {
+                PendingNode node = new PendingNode(this, ref);
+                pendingMessageHelper.addToMap(ref, node);
+                if (newHead == null) {
+                    newHead = node;
+                    appendNode = node;
+                    continue;
+                }
+                appendNode.linkAfter(node);
+                appendNode = node;
+            }
+            // insert this new list at root
+            if (root == null) {
+                root = newHead;
+                tail = appendNode;
+            } else {
+                appendNode.linkAfter(root);
+                root = newHead;
+            }
+        }
+    }
+
 }

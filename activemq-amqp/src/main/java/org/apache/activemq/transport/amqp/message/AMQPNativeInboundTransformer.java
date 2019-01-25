@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
@@ -16,13 +16,9 @@
  */
 package org.apache.activemq.transport.amqp.message;
 
-import javax.jms.Message;
+import org.apache.activemq.command.ActiveMQMessage;
 
 public class AMQPNativeInboundTransformer extends AMQPRawInboundTransformer {
-
-    public AMQPNativeInboundTransformer(JMSVendor vendor) {
-        super(vendor);
-    }
 
     @Override
     public String getTransformerName() {
@@ -31,16 +27,17 @@ public class AMQPNativeInboundTransformer extends AMQPRawInboundTransformer {
 
     @Override
     public InboundTransformer getFallbackTransformer() {
-        return new AMQPRawInboundTransformer(getVendor());
+        return new AMQPRawInboundTransformer();
     }
 
     @Override
-    public Message transform(EncodedMessage amqpMessage) throws Exception {
+    protected ActiveMQMessage doTransform(EncodedMessage amqpMessage) throws Exception {
         org.apache.qpid.proton.message.Message amqp = amqpMessage.decode();
 
-        Message rc = super.transform(amqpMessage);
+        ActiveMQMessage result = super.doTransform(amqpMessage);
 
-        populateMessage(rc, amqp);
-        return rc;
+        populateMessage(result, amqp);
+
+        return result;
     }
 }

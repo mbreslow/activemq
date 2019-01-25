@@ -16,6 +16,7 @@
  */
 package org.apache.activemq.transport.ws;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
@@ -27,6 +28,8 @@ import java.util.concurrent.TimeUnit;
 import org.apache.activemq.transport.stomp.Stomp;
 import org.apache.activemq.transport.stomp.StompFrame;
 import org.apache.activemq.util.Wait;
+import org.eclipse.jetty.util.ssl.SslContextFactory;
+import org.eclipse.jetty.websocket.client.ClientUpgradeRequest;
 import org.eclipse.jetty.websocket.client.WebSocketClient;
 import org.junit.After;
 import org.junit.Before;
@@ -50,10 +53,14 @@ public class StompWSTransportTest extends WSTransportTestSupport {
         super.setUp();
         wsStompConnection = new StompWSConnection();
 
-        wsClient = new WebSocketClient();
+
+        ClientUpgradeRequest request = new ClientUpgradeRequest();
+        request.setSubProtocols("v11.stomp");
+
+        wsClient = new WebSocketClient(new SslContextFactory(true));
         wsClient.start();
 
-        wsClient.connect(wsStompConnection, wsConnectUri);
+        wsClient.connect(wsStompConnection, wsConnectUri, request);
         if (!wsStompConnection.awaitConnection(30, TimeUnit.SECONDS)) {
             throw new IOException("Could not connect to STOMP WS endpoint");
         }
@@ -85,6 +92,7 @@ public class StompWSTransportTest extends WSTransportTestSupport {
         String incoming = wsStompConnection.receive(30, TimeUnit.SECONDS);
         assertNotNull(incoming);
         assertTrue(incoming.startsWith("CONNECTED"));
+        assertEquals("v11.stomp", wsStompConnection.getConnection().getUpgradeResponse().getAcceptedSubProtocol());
 
         assertTrue("Connection should close", Wait.waitFor(new Wait.Condition() {
 
@@ -137,11 +145,15 @@ public class StompWSTransportTest extends WSTransportTestSupport {
                               "\n" + Stomp.NULL;
         wsStompConnection.sendRawFrame(connectFrame);
 
-        String incoming = wsStompConnection.receive(30, TimeUnit.SECONDS);
+        try {
+            String incoming = wsStompConnection.receive(30, TimeUnit.SECONDS);
 
-        assertTrue(incoming.startsWith("ERROR"));
-        assertTrue(incoming.indexOf("heart-beat") >= 0);
-        assertTrue(incoming.indexOf("message:") >= 0);
+            assertTrue(incoming.startsWith("ERROR"));
+            assertTrue(incoming.indexOf("heart-beat") >= 0);
+            assertTrue(incoming.indexOf("message:") >= 0);
+        } catch (IOException ex) {
+            LOG.debug("Connection closed before Frame was read.");
+        }
 
         assertTrue("Connection should close", Wait.waitFor(new Wait.Condition() {
 
@@ -163,11 +175,15 @@ public class StompWSTransportTest extends WSTransportTestSupport {
                               "\n" + Stomp.NULL;
         wsStompConnection.sendRawFrame(connectFrame);
 
-        String incoming = wsStompConnection.receive(30, TimeUnit.SECONDS);
+        try {
+            String incoming = wsStompConnection.receive(30, TimeUnit.SECONDS);
 
-        assertTrue(incoming.startsWith("ERROR"));
-        assertTrue(incoming.indexOf("heart-beat") >= 0);
-        assertTrue(incoming.indexOf("message:") >= 0);
+            assertTrue(incoming.startsWith("ERROR"));
+            assertTrue(incoming.indexOf("heart-beat") >= 0);
+            assertTrue(incoming.indexOf("message:") >= 0);
+        } catch (IOException ex) {
+            LOG.debug("Connection closed before Frame was read.");
+        }
 
         assertTrue("Connection should close", Wait.waitFor(new Wait.Condition() {
 
@@ -189,11 +205,15 @@ public class StompWSTransportTest extends WSTransportTestSupport {
                               "\n" + Stomp.NULL;
         wsStompConnection.sendRawFrame(connectFrame);
 
-        String incoming = wsStompConnection.receive(30, TimeUnit.SECONDS);
+        try {
+            String incoming = wsStompConnection.receive(30, TimeUnit.SECONDS);
 
-        assertTrue(incoming.startsWith("ERROR"));
-        assertTrue(incoming.indexOf("heart-beat") >= 0);
-        assertTrue(incoming.indexOf("message:") >= 0);
+            assertTrue(incoming.startsWith("ERROR"));
+            assertTrue(incoming.indexOf("heart-beat") >= 0);
+            assertTrue(incoming.indexOf("message:") >= 0);
+        } catch (IOException ex) {
+            LOG.debug("Connection closed before Frame was read.");
+        }
 
         assertTrue("Connection should close", Wait.waitFor(new Wait.Condition() {
 
@@ -275,6 +295,42 @@ public class StompWSTransportTest extends WSTransportTestSupport {
         service.shutdownNow();
         service.awaitTermination(5, TimeUnit.SECONDS);
 
-        wsStompConnection.sendFrame(new StompFrame(Stomp.Commands.DISCONNECT));
+        try {
+            wsStompConnection.sendFrame(new StompFrame(Stomp.Commands.DISCONNECT));
+        } catch (Exception ex) {
+            LOG.info("Caught exception on write of disconnect", ex);
+        }
+    }
+
+    @Test(timeout = 60000)
+    public void testEscapedHeaders() throws Exception {
+        String connectFrame = "STOMP\n" +
+                              "login:system\n" +
+                              "passcode:manager\n" +
+                              "accept-version:1.1\n" +
+                              "heart-beat:0,0\n" +
+                              "host:localhost\n" +
+                              "\n" + Stomp.NULL;
+
+        wsStompConnection.sendRawFrame(connectFrame);
+        String incoming = wsStompConnection.receive(30, TimeUnit.SECONDS);
+        assertTrue(incoming.startsWith("CONNECTED"));
+
+        String message = "SEND\n" + "destination:/queue/" + getTestName() + "\nescaped-header:one\\ntwo\\cthree\n\n" + "Hello World" + Stomp.NULL;
+        wsStompConnection.sendRawFrame(message);
+
+        String frame = "SUBSCRIBE\n" + "destination:/queue/" + getTestName() + "\n" +
+                       "id:12345\n" + "ack:auto\n\n" + Stomp.NULL;
+        wsStompConnection.sendRawFrame(frame);
+
+        incoming = wsStompConnection.receive(30, TimeUnit.SECONDS);
+        assertTrue(incoming.startsWith("MESSAGE"));
+        assertTrue(incoming.indexOf("escaped-header:one\\ntwo\\cthree") >= 0);
+
+        try {
+            wsStompConnection.sendFrame(new StompFrame(Stomp.Commands.DISCONNECT));
+        } catch (Exception ex) {
+            LOG.info("Caught exception on write of disconnect", ex);
+        }
     }
 }

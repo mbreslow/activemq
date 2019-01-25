@@ -31,9 +31,7 @@ import javax.resource.spi.UnavailableException;
 import javax.resource.spi.endpoint.MessageEndpoint;
 
 import org.apache.activemq.ActiveMQConnection;
-import org.apache.activemq.ActiveMQQueueSession;
 import org.apache.activemq.ActiveMQSession;
-import org.apache.activemq.ActiveMQTopicSession;
 import org.apache.activemq.command.MessageDispatch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -76,11 +74,11 @@ public class ServerSessionPoolImpl implements ServerSessionPool {
             if (activationSpec.isUseRAManagedTransactionEnabled()) {
                 // The RA will manage the transaction commit.
                 endpoint = createEndpoint(null);
-                return new ServerSessionImpl(this, (ActiveMQSession)session, activeMQAsfEndpointWorker.workManager, endpoint, true, batchSize);
+                return new ServerSessionImpl(this, session, activeMQAsfEndpointWorker.workManager, endpoint, true, batchSize);
             } else {
                 // Give the container an object to manage to transaction with.
                 endpoint = createEndpoint(new LocalAndXATransaction(session.getTransactionContext()));
-                return new ServerSessionImpl(this, (ActiveMQSession)session, activeMQAsfEndpointWorker.workManager, endpoint, false, batchSize);
+                return new ServerSessionImpl(this, session, activeMQAsfEndpointWorker.workManager, endpoint, false, batchSize);
             }
         } catch (UnavailableException e) {
             // The container could be limiting us on the number of endpoints
@@ -102,6 +100,7 @@ public class ServerSessionPoolImpl implements ServerSessionPool {
 
     /**
      */
+    @Override
     public ServerSession getServerSession() throws JMSException {
         if (LOG.isDebugEnabled()) {
             LOG.debug("ServerSession requested.");
@@ -195,7 +194,7 @@ public class ServerSessionPoolImpl implements ServerSessionPool {
 
     public void returnToPool(ServerSessionImpl ss) {
         sessionLock.lock();
-            activeSessions.remove(ss);
+        activeSessions.remove(ss);
         try {
             // make sure we only return non-stale sessions to the pool
             if ( ss.isStale() ) {
@@ -226,12 +225,12 @@ public class ServerSessionPoolImpl implements ServerSessionPool {
         }
         try {
             ActiveMQSession session = (ActiveMQSession)ss.getSession();
-            List l = session.getUnconsumedMessages();
-            if (!l.isEmpty()) {
+            List<MessageDispatch> l = session.getUnconsumedMessages();
+            if (!isClosing() && !l.isEmpty()) {
                 ActiveMQConnection connection = activeMQAsfEndpointWorker.getConnection();
                 if (connection != null) {
-                    for (Iterator i = l.iterator(); i.hasNext();) {
-                        MessageDispatch md = (MessageDispatch)i.next();
+                    for (Iterator<MessageDispatch> i = l.iterator(); i.hasNext();) {
+                        MessageDispatch md = i.next();
                         if (connection.hasDispatcher(md.getConsumerId())) {
                             dispatchToSession(md);
                             LOG.trace("on remove of {} redispatch of {}", session, md);
@@ -265,10 +264,6 @@ public class ServerSessionPoolImpl implements ServerSessionPool {
         ActiveMQSession session = null;
         if (s instanceof ActiveMQSession) {
             session = (ActiveMQSession) s;
-        } else if (s instanceof ActiveMQQueueSession) {
-            session = (ActiveMQSession) s;
-        } else if (s instanceof ActiveMQTopicSession) {
-            session = (ActiveMQSession) s;
         } else {
             activeMQAsfEndpointWorker.getConnection()
                     .onAsyncException(new JMSException(
@@ -281,6 +276,7 @@ public class ServerSessionPoolImpl implements ServerSessionPool {
 
     public void close() {
         closing.set(true);
+        LOG.debug("{} close", this);
         int activeCount = closeSessions();
         // we may have to wait erroneously 250ms if an
         // active session is removed during our wait and we
@@ -305,11 +301,16 @@ public class ServerSessionPoolImpl implements ServerSessionPool {
     protected int closeSessions() {
         sessionLock.lock();
         try {
+            List<ServerSessionImpl> alreadyClosedServerSessions = new ArrayList<>(activeSessions.size());
             for (ServerSessionImpl ss : activeSessions) {
                 try {
                     ActiveMQSession session = (ActiveMQSession) ss.getSession();
                     if (!session.isClosed()) {
                         session.close();
+                    } else {
+                        LOG.debug("Session {} already closed", session);
+                        alreadyClosedServerSessions.add(ss);
+
                     }
                 } catch (JMSException ignored) {
                     if (LOG.isDebugEnabled()) {
@@ -317,6 +318,11 @@ public class ServerSessionPoolImpl implements ServerSessionPool {
                     }
                 }
             }
+            for (ServerSessionImpl ss : alreadyClosedServerSessions) {
+                removeFromPool(ss);
+            }
+            alreadyClosedServerSessions.clear();
+
             for (ServerSessionImpl ss : idleSessions) {
                 ss.close();
             }

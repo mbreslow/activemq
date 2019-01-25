@@ -28,6 +28,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import javax.jms.InvalidClientIDException;
@@ -112,10 +113,26 @@ public class RegionBroker extends EmptyBroker {
     private boolean allowTempAutoCreationOnSend;
 
     private final ReentrantReadWriteLock inactiveDestinationsPurgeLock = new ReentrantReadWriteLock();
+    private final TaskRunnerFactory taskRunnerFactory;
+    private final AtomicBoolean purgeInactiveDestinationsTaskInProgress = new AtomicBoolean(false);
     private final Runnable purgeInactiveDestinationsTask = new Runnable() {
         @Override
         public void run() {
-            purgeInactiveDestinations();
+            if (purgeInactiveDestinationsTaskInProgress.compareAndSet(false, true)) {
+                taskRunnerFactory.execute(purgeInactiveDestinationsWork);
+            }
+        }
+    };
+    private final Runnable purgeInactiveDestinationsWork = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                purgeInactiveDestinations();
+            } catch (Throwable ignored) {
+                LOG.error("Unexpected exception on purgeInactiveDestinations {}", this, ignored);
+            } finally {
+                purgeInactiveDestinationsTaskInProgress.set(false);
+            }
         }
     };
 
@@ -134,6 +151,7 @@ public class RegionBroker extends EmptyBroker {
         this.destinationInterceptor = destinationInterceptor;
         tempQueueRegion = createTempQueueRegion(memoryManager, taskRunnerFactory, destinationFactory);
         tempTopicRegion = createTempTopicRegion(memoryManager, taskRunnerFactory, destinationFactory);
+        this.taskRunnerFactory = taskRunnerFactory;
     }
 
     @Override
@@ -159,15 +177,6 @@ public class RegionBroker extends EmptyBroker {
         } catch (JMSException jmse) {
             return Collections.emptySet();
         }
-    }
-
-    @Override
-    @SuppressWarnings("rawtypes")
-    public Broker getAdaptor(Class type) {
-        if (type.isInstance(this)) {
-            return this;
-        }
-        return null;
     }
 
     public Region getQueueRegion() {
@@ -484,7 +493,7 @@ public class RegionBroker extends EmptyBroker {
         consumerExchange.getRegion().acknowledge(consumerExchange, ack);
     }
 
-    protected Region getRegion(ActiveMQDestination destination) throws JMSException {
+    public Region getRegion(ActiveMQDestination destination) throws JMSException {
         switch (destination.getDestinationType()) {
             case ActiveMQDestination.QUEUE_TYPE:
                 return queueRegion;
@@ -735,19 +744,7 @@ public class RegionBroker extends EmptyBroker {
 
     @Override
     public boolean isExpired(MessageReference messageReference) {
-        boolean expired = false;
-        if (messageReference.isExpired()) {
-            try {
-                // prevent duplicate expiry processing
-                Message message = messageReference.getMessage();
-                synchronized (message) {
-                    expired = stampAsExpired(message);
-                }
-            } catch (IOException e) {
-                LOG.warn("unexpected exception on message expiry determination for: {}", messageReference, e);
-            }
-        }
-        return expired;
+        return messageReference.canProcessAsExpired();
     }
 
     private boolean stampAsExpired(Message message) throws IOException {
@@ -775,6 +772,13 @@ public class RegionBroker extends EmptyBroker {
                     DeadLetterStrategy deadLetterStrategy = ((Destination) node.getRegionDestination()).getDeadLetterStrategy();
                     if (deadLetterStrategy != null) {
                         if (deadLetterStrategy.isSendToDeadLetterQueue(message)) {
+                            ActiveMQDestination deadLetterDestination = deadLetterStrategy.getDeadLetterQueueFor(message, subscription);
+                            // Prevent a DLQ loop where same message is sent from a DLQ back to itself
+                            if (deadLetterDestination.equals(message.getDestination())) {
+                                LOG.debug("Not re-adding to DLQ: {}, dest: {}", message.getMessageId(), message.getDestination());
+                                return false;
+                            }
+
                             // message may be inflight to other subscriptions so do not modify
                             message = message.copy();
                             long dlqExpiration = deadLetterStrategy.getExpiration();
@@ -796,12 +800,11 @@ public class RegionBroker extends EmptyBroker {
                             // not get filled when the message is first sent,
                             // it is only populated if the message is routed to
                             // another destination like the DLQ
-                            ActiveMQDestination deadLetterDestination = deadLetterStrategy.getDeadLetterQueueFor(message, subscription);
                             ConnectionContext adminContext = context;
                             if (context.getSecurityContext() == null || !context.getSecurityContext().isBrokerContext()) {
                                 adminContext = BrokerSupport.getConnectionContext(this);
                             }
-                            addDestination(adminContext, deadLetterDestination, false).getActiveMQDestination().setDLQ();
+                            addDestination(adminContext, deadLetterDestination, false).getActiveMQDestination().setDLQ(true);
                             BrokerSupport.resendNoCopy(adminContext, message, deadLetterDestination);
                             return true;
                         }
@@ -910,7 +913,7 @@ public class RegionBroker extends EmptyBroker {
                     log.info("{} Inactive for longer than {} ms - removing ...", dest.getName(), dest.getInactiveTimeoutBeforeGC());
                     try {
                         getRoot().removeDestination(context, dest.getActiveMQDestination(), isAllowTempAutoCreationOnSend() ? 1 : 0);
-                    } catch (Exception e) {
+                    } catch (Throwable e) {
                         LOG.error("Failed to remove inactive destination {}", dest, e);
                     }
                 }

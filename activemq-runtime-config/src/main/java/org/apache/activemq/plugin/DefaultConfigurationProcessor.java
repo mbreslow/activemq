@@ -20,6 +20,7 @@ import org.apache.activemq.util.IntrospectionSupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.PostConstruct;
 import javax.xml.bind.JAXBElement;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -96,7 +97,7 @@ public class DefaultConfigurationProcessor implements ConfigurationProcessor {
             Object existing = current.get(currentIndex);
             Object candidate = modification.get(modIndex);
             if (!existing.equals(candidate)) {
-                plugin.info("modification to:" + existing + " , with: " + candidate);
+                plugin.debug("modification to:" + existing + " , with: " + candidate);
                 ConfigurationProcessor processor = findProcessor(existing);
                 if (processor != null) {
                     processor.modify(existing, candidate);
@@ -204,12 +205,28 @@ public class DefaultConfigurationProcessor implements ConfigurationProcessor {
                 try {
                     setter.invoke(instance, JAXBUtils.matchType(argument, setter.getParameterTypes()[0]));
                 } catch (Exception e) {
-                    plugin.info("failed to invoke " + setter + " on " + instance, e);
+                    plugin.info("failed to invoke " + setter + " on " + instance + " with args " + argument, e);
                 }
             } else {
                 plugin.info("failed to find setter for " + elementName + " on :" + instance);
             }
         }
+        invokePostConstruct(instance);
         return instance;
+    }
+
+    private <T> void invokePostConstruct(T instance) {
+        try {
+            for (Method m : instance.getClass().getDeclaredMethods()) {
+                if (m.isAnnotationPresent(PostConstruct.class) && m.getParameterCount() == 0) {
+                    try {
+                        JAXBUtils.ensureAccessible(m);
+                        m.invoke(instance, null);
+                    } catch (Exception e) {
+                        plugin.info("failed to invoke @PostConstruct method " + m + " on " + instance, e);
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
     }
 }

@@ -24,7 +24,12 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class SelectorWorker implements Runnable {
+
+    private static final Logger LOG = LoggerFactory.getLogger(SelectorWorker.class);
 
     private static final AtomicInteger NEXT_ID = new AtomicInteger();
 
@@ -35,7 +40,7 @@ public class SelectorWorker implements Runnable {
 
     final AtomicInteger retainCounter = new AtomicInteger(1);
     private final ConcurrentLinkedQueue<Runnable> ioTasks = new ConcurrentLinkedQueue<Runnable>();
-       
+
     public SelectorWorker(SelectorManager manager) throws IOException {
         this.manager = manager;
         selector = Selector.open();
@@ -57,56 +62,54 @@ public class SelectorWorker implements Runnable {
             manager.onWorkerNotFullEvent(this);
         }
     }
-    
-    boolean isReleased() {
-        return retainCounter.get()==0;
-    }
 
+    boolean isReleased() {
+        return retainCounter.get() == 0;
+    }
 
     public void addIoTask(Runnable work) {
         ioTasks.add(work);
         selector.wakeup();
     }
-    
+
     private void processIoTasks() {
-        Runnable task; 
-        while( (task= ioTasks.poll()) !=null ) {
+        Runnable task;
+        while ((task = ioTasks.poll()) != null) {
             try {
                 task.run();
             } catch (Throwable e) {
-                e.printStackTrace();
+                LOG.debug(e.getMessage(), e);
             }
         }
     }
 
-    
-
+    @Override
     public void run() {
 
         String origName = Thread.currentThread().getName();
         try {
             Thread.currentThread().setName("Selector Worker: " + id);
             while (!isReleased()) {
-            	
-            	processIoTasks();
-            	
-            	int count = selector.select(10);
-            	
+
+                processIoTasks();
+
+                int count = selector.select(10);
+
                 if (count == 0) {
                     continue;
                 }
 
                 // Get a java.util.Set containing the SelectionKey objects
                 // for all channels that are ready for I/O.
-                Set keys = selector.selectedKeys();
+                Set<SelectionKey> keys = selector.selectedKeys();
 
-                for (Iterator i = keys.iterator(); i.hasNext();) {
-                    final SelectionKey key = (SelectionKey)i.next();
+                for (Iterator<SelectionKey> i = keys.iterator(); i.hasNext();) {
+                    final SelectionKey key = i.next();
                     i.remove();
 
-                    final SelectorSelection s = (SelectorSelection)key.attachment();
+                    final SelectorSelection s = (SelectorSelection) key.attachment();
                     try {
-                        if( key.isValid() ) {
+                        if (key.isValid()) {
                             key.interestOps(0);
                         }
 
@@ -114,6 +117,7 @@ public class SelectorWorker implements Runnable {
                         // while we process the
                         // currently selected keys
                         manager.getChannelExecutor().execute(new Runnable() {
+                            @Override
                             public void run() {
                                 try {
                                     s.onSelect();
@@ -127,17 +131,15 @@ public class SelectorWorker implements Runnable {
                     } catch (Throwable e) {
                         s.onError(e);
                     }
-
                 }
-
             }
-        } catch (Throwable e) {         	
+        } catch (Throwable e) {
             e.printStackTrace();
             // Notify all the selections that the error occurred.
-            Set keys = selector.keys();
-            for (Iterator i = keys.iterator(); i.hasNext();) {
-                SelectionKey key = (SelectionKey)i.next();
-                SelectorSelection s = (SelectorSelection)key.attachment();
+            Set<SelectionKey> keys = selector.keys();
+            for (Iterator<SelectionKey> i = keys.iterator(); i.hasNext();) {
+                SelectionKey key = i.next();
+                SelectorSelection s = (SelectorSelection) key.attachment();
                 s.onError(e);
             }
         } finally {
@@ -145,10 +147,9 @@ public class SelectorWorker implements Runnable {
                 manager.onWorkerEmptyEvent(this);
                 selector.close();
             } catch (IOException ignore) {
-            	ignore.printStackTrace();
+                LOG.debug(ignore.getMessage(), ignore);
             }
             Thread.currentThread().setName(origName);
         }
     }
-
 }

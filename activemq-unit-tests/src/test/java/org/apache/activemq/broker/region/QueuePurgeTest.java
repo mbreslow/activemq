@@ -17,6 +17,8 @@
 package org.apache.activemq.broker.region;
 
 import java.io.File;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.jms.Connection;
@@ -30,6 +32,7 @@ import javax.jms.Session;
 import javax.jms.TextMessage;
 import javax.management.MalformedObjectNameException;
 import javax.management.ObjectName;
+
 import org.apache.activemq.ActiveMQConnectionFactory;
 import org.apache.activemq.CombinationTestSupport;
 import org.apache.activemq.broker.BrokerService;
@@ -57,6 +60,7 @@ public class QueuePurgeTest extends CombinationTestSupport {
     Queue queue;
     MessageConsumer consumer;
 
+    @Override
     protected void setUp() throws Exception {
         setMaxTestTime(10*60*1000); // 10 mins
         setAutoFail(true);
@@ -78,6 +82,7 @@ public class QueuePurgeTest extends CombinationTestSupport {
         connection.start();
     }
 
+    @Override
     protected void tearDown() throws Exception {
         super.tearDown();
         if (consumer != null) {
@@ -90,7 +95,15 @@ public class QueuePurgeTest extends CombinationTestSupport {
     }
 
     public void testPurgeLargeQueue() throws Exception {
-        applyBrokerSpoolingPolicy();
+        testPurgeLargeQueue(false);
+    }
+
+    public void testPurgeLargeQueuePrioritizedMessages() throws Exception {
+        testPurgeLargeQueue(true);
+    }
+
+    private void testPurgeLargeQueue(boolean prioritizedMessages) throws Exception {
+        applyBrokerSpoolingPolicy(prioritizedMessages);
         createProducerAndSendMessages(NUM_TO_SEND);
         QueueViewMBean proxy = getProxyToQueueViewMBean();
         LOG.info("purging..");
@@ -127,10 +140,11 @@ public class QueuePurgeTest extends CombinationTestSupport {
                 proxy.getQueueSize());
         assertTrue("cache is disabled, temp store being used", !proxy.isCacheEnabled());
         assertTrue("got expected info purge log message", gotPurgeLogMessage.get());
+        assertEquals("Found messages when browsing", 0, proxy.browseMessages().size());
     }
 
-    public void testRepeatedExpiryProcessingOfLargeQueue() throws Exception {       
-        applyBrokerSpoolingPolicy();
+    public void testRepeatedExpiryProcessingOfLargeQueue() throws Exception {
+        applyBrokerSpoolingPolicy(false);
         final int expiryPeriod = 500;
         applyExpiryDuration(expiryPeriod);
         createProducerAndSendMessages(NUM_TO_SEND);
@@ -140,15 +154,16 @@ public class QueuePurgeTest extends CombinationTestSupport {
         assertEquals("Queue size is has not changed " + proxy.getQueueSize(), NUM_TO_SEND,
                 proxy.getQueueSize());
     }
-    
+
 
     private void applyExpiryDuration(int i) {
         broker.getDestinationPolicy().getDefaultEntry().setExpireMessagesPeriod(i);
     }
 
-    private void applyBrokerSpoolingPolicy() {
+    private void applyBrokerSpoolingPolicy(boolean prioritizedMessages) {
         PolicyMap policyMap = new PolicyMap();
         PolicyEntry defaultEntry = new PolicyEntry();
+        defaultEntry.setPrioritizedMessages(prioritizedMessages);
         defaultEntry.setProducerFlowControl(false);
         PendingQueueMessageStoragePolicy pendingQueuePolicy = new FilePendingQueueMessageStoragePolicy();
         defaultEntry.setPendingQueuePolicy(pendingQueuePolicy);
@@ -156,9 +171,65 @@ public class QueuePurgeTest extends CombinationTestSupport {
         broker.setDestinationPolicy(policyMap);
     }
 
-    
-    public void testPurgeLargeQueueWithConsumer() throws Exception {       
-        applyBrokerSpoolingPolicy();
+
+    public void testPurgeLargeQueueWithConsumer() throws Exception {
+        testPurgeLargeQueueWithConsumer(false);
+    }
+
+    public void testPurgeLargeQueueWithConsumerPrioritizedMessages() throws Exception {
+        testPurgeLargeQueueWithConsumer(true);
+    }
+
+    public void testConcurrentPurgeAndSend() throws Exception {
+        testConcurrentPurgeAndSend(false);
+    }
+
+    public void testConcurrentPurgeAndSendPrioritizedMessages() throws Exception {
+        testConcurrentPurgeAndSend(true);
+    }
+
+    private void testConcurrentPurgeAndSend(boolean prioritizedMessages) throws Exception {
+        applyBrokerSpoolingPolicy(false);
+        createProducerAndSendMessages(NUM_TO_SEND / 2);
+        final QueueViewMBean proxy = getProxyToQueueViewMBean();
+        createConsumer();
+        final long start = System.currentTimeMillis();
+        ExecutorService service = Executors.newFixedThreadPool(1);
+        try {
+            LOG.info("purging..");
+            service.submit(new Runnable() {
+
+                @Override
+                public void run() {
+                    try {
+                        proxy.purge();
+                    } catch (Exception e) {
+                        fail(e.getMessage());
+                    }
+                    LOG.info("purge done: " + (System.currentTimeMillis() - start) + "ms");
+                }
+            });
+
+            //send should get blocked while purge is running
+            //which should ensure the metrics are correct
+            createProducerAndSendMessages(NUM_TO_SEND / 2);
+
+            Message msg;
+            do {
+                msg = consumer.receive(1000);
+                if (msg != null) {
+                    msg.acknowledge();
+                }
+            } while (msg != null);
+            assertEquals("Queue size not valid", 0, proxy.getQueueSize());
+            assertEquals("Found messages when browsing", 0, proxy.browseMessages().size());
+        } finally {
+            service.shutdownNow();
+        }
+    }
+
+    private void testPurgeLargeQueueWithConsumer(boolean prioritizedMessages) throws Exception {
+        applyBrokerSpoolingPolicy(prioritizedMessages);
         createProducerAndSendMessages(NUM_TO_SEND);
         QueueViewMBean proxy = getProxyToQueueViewMBean();
         createConsumer();
@@ -177,6 +248,7 @@ public class QueuePurgeTest extends CombinationTestSupport {
             }
         } while (msg != null);
         assertEquals("Queue size not valid", 0, proxy.getQueueSize());
+        assertEquals("Found messages when browsing", 0, proxy.browseMessages().size());
     }
 
     private QueueViewMBean getProxyToQueueViewMBean()

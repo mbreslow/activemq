@@ -40,6 +40,7 @@ import org.apache.activemq.command.Message;
 import org.apache.activemq.command.MessageAck;
 import org.apache.activemq.command.MessageDispatch;
 import org.apache.activemq.command.MessageId;
+import org.apache.activemq.command.RemoveInfo;
 import org.apache.activemq.store.TopicMessageStore;
 import org.apache.activemq.usage.SystemUsage;
 import org.apache.activemq.usage.Usage;
@@ -217,7 +218,8 @@ public class DurableTopicSubscription extends PrefetchSubscription implements Us
 
                 for (final MessageReference node : dispatched) {
                     // Mark the dispatched messages as redelivered for next time.
-                    if (lastDeliveredSequenceId == 0 || (lastDeliveredSequenceId > 0 && node.getMessageId().getBrokerSequenceId() <= lastDeliveredSequenceId)) {
+                    if (lastDeliveredSequenceId == RemoveInfo.LAST_DELIVERED_UNKNOWN || lastDeliveredSequenceId == 0 ||
+                            (lastDeliveredSequenceId > 0 && node.getMessageId().getBrokerSequenceId() <= lastDeliveredSequenceId)) {
                         Integer count = redeliveredMessages.get(node.getMessageId());
                         if (count != null) {
                             redeliveredMessages.put(node.getMessageId(), Integer.valueOf(count.intValue() + 1));
@@ -228,9 +230,9 @@ public class DurableTopicSubscription extends PrefetchSubscription implements Us
                     if (keepDurableSubsActive && pending.isTransient()) {
                         pending.addMessageFirst(node);
                         pending.rollback(node.getMessageId());
-                    } else {
-                        node.decrementReferenceCount();
                     }
+                    // createMessageDispatch increments on remove from pending for dispatch
+                    node.decrementReferenceCount();
                 }
 
                 if (!topicsToDeactivate.isEmpty()) {
@@ -262,6 +264,7 @@ public class DurableTopicSubscription extends PrefetchSubscription implements Us
     protected MessageDispatch createMessageDispatch(MessageReference node, Message message) {
         MessageDispatch md = super.createMessageDispatch(node, message);
         if (node != QueueMessageReference.NULL_MESSAGE) {
+            node.incrementReferenceCount();
             Integer count = redeliveredMessages.get(node.getMessageId());
             if (count != null) {
                 md.setRedeliveryCounter(count.intValue());
@@ -327,6 +330,9 @@ public class DurableTopicSubscription extends PrefetchSubscription implements Us
         redeliveredMessages.remove(node.getMessageId());
         node.decrementReferenceCount();
         ((Destination)node.getRegionDestination()).getDestinationStatistics().getDequeues().increment();
+        if (info.isNetworkSubscription()) {
+            ((Destination)node.getRegionDestination()).getDestinationStatistics().getForwards().add(ack.getMessageCount());
+        }
     }
 
     @Override

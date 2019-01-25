@@ -22,7 +22,7 @@
   <parent>
     <groupId>org.apache.activemq</groupId>
     <artifactId>activemq-parent</artifactId>
-    <version>5.13-SNAPSHOT</version>
+    <version>5.16.0-SNAPSHOT</version>
   </parent>
 
   <artifactId>activemq-jms-pool</artifactId>
@@ -32,6 +32,7 @@
 
   <properties>
     <activemq.osgi.import.pkg>
+      javax.jms*;version="[1.1,3)",
       javax.transaction*;resolution:=optional,
       org.apache.geronimo.transaction.manager*;resolution:=optional,
       *
@@ -76,6 +77,11 @@
     <dependency>
       <groupId>org.apache.activemq</groupId>
       <artifactId>activemq-broker</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>activemq-jaas</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -132,7 +138,7 @@
         </plugins>
       </build>
     </profile>
-	<profile>
+    <profile>
       <id>activemq.tests-autoTransport</id>
       <activation>
         <property>

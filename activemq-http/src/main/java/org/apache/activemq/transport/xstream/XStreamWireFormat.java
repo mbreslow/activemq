@@ -20,13 +20,16 @@ import java.io.IOException;
 import java.io.Reader;
 
 import com.thoughtworks.xstream.converters.Converter;
-import com.thoughtworks.xstream.converters.ConverterLookup;
 import com.thoughtworks.xstream.converters.MarshallingContext;
 import com.thoughtworks.xstream.converters.UnmarshallingContext;
 import com.thoughtworks.xstream.io.HierarchicalStreamReader;
 import com.thoughtworks.xstream.io.HierarchicalStreamWriter;
+
+import org.apache.activemq.command.ConsumerInfo;
 import org.apache.activemq.command.MarshallAware;
 import org.apache.activemq.command.MessageDispatch;
+import org.apache.activemq.command.TransientInitializer;
+import org.apache.activemq.transport.stomp.XStreamSupport;
 import org.apache.activemq.transport.util.TextWireFormat;
 import org.apache.activemq.util.ByteSequence;
 import org.apache.activemq.wireformat.WireFormat;
@@ -65,7 +68,11 @@ public class XStreamWireFormat extends TextWireFormat {
 
     @Override
     public Object unmarshalText(Reader reader) {
-        return getXStream().fromXML(reader);
+        Object val = getXStream().fromXML(reader);
+        if (val instanceof TransientInitializer) {
+            ((TransientInitializer)val).initTransients();
+        }
+        return val;
     }
 
     @Override
@@ -117,7 +124,7 @@ public class XStreamWireFormat extends TextWireFormat {
     // Implementation methods
     // -------------------------------------------------------------------------
     protected XStream createXStream() {
-        final XStream xstream = new XStream();
+        final XStream xstream = XStreamSupport.createXStream();
         xstream.ignoreUnknownElements();
         xstream.registerConverter(new Converter() {
             final Converter delegate = xstream.getConverterLookup().lookupConverterForType(ByteSequence.class);

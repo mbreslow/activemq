@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
@@ -20,11 +20,14 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.activemq.util.Wait;
+import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.eclipse.jetty.websocket.client.ClientUpgradeRequest;
 import org.eclipse.jetty.websocket.client.WebSocketClient;
 import org.fusesource.hawtbuf.UTF8Buffer;
@@ -35,25 +38,43 @@ import org.fusesource.mqtt.codec.PINGREQ;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameters;
 
+@RunWith(Parameterized.class)
 public class MQTTWSTransportTest extends WSTransportTestSupport {
 
     protected WebSocketClient wsClient;
     protected MQTTWSConnection wsMQTTConnection;
     protected ClientUpgradeRequest request;
 
+    protected boolean partialFrames;
+
+    @Parameters(name="{0}")
+    public static Collection<Object[]> data() {
+        return Arrays.asList(new Object[][] {
+            {"complete-frames", false},
+            {"partial-frames", true}
+        });
+    }
+
+    public MQTTWSTransportTest(String testName, boolean partialFrames) {
+        this.partialFrames = partialFrames;
+    }
+
     @Override
     @Before
     public void setUp() throws Exception {
         super.setUp();
 
-        wsClient = new WebSocketClient();
+        wsClient = new WebSocketClient(new SslContextFactory(true));
         wsClient.start();
 
         request = new ClientUpgradeRequest();
         request.setSubProtocols("mqttv3.1");
 
-        wsMQTTConnection = new MQTTWSConnection();
+        wsMQTTConnection = new MQTTWSConnection().setWritePartialFrames(partialFrames);
 
         wsClient.connect(wsMQTTConnection, wsConnectUri, request);
         if (!wsMQTTConnection.awaitConnection(30, TimeUnit.SECONDS)) {
@@ -78,7 +99,7 @@ public class MQTTWSTransportTest extends WSTransportTestSupport {
         for (int i = 0; i < 10; ++i) {
             testConnect();
 
-            wsMQTTConnection = new MQTTWSConnection();
+            wsMQTTConnection = new MQTTWSConnection().setWritePartialFrames(partialFrames);
 
             wsClient.connect(wsMQTTConnection, wsConnectUri, request);
             if (!wsMQTTConnection.awaitConnection(30, TimeUnit.SECONDS)) {

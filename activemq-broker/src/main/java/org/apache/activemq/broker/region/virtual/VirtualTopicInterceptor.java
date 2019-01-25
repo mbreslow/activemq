@@ -34,6 +34,8 @@ import org.apache.activemq.command.LocalTransactionId;
 import org.apache.activemq.command.Message;
 import org.apache.activemq.util.LRUCache;
 
+import javax.jms.ResourceAllocationException;
+
 /**
  * A Destination which implements <a href="http://activemq.org/site/virtual-destinations.html">Virtual Topic</a>
  */
@@ -44,6 +46,8 @@ public class VirtualTopicInterceptor extends DestinationFilter {
     private final boolean local;
     private final boolean concurrentSend;
     private final boolean transactedSend;
+    private final boolean dropMessageOnResourceLimit;
+    private final boolean setOriginalDestination;
 
     private final LRUCache<ActiveMQDestination, ActiveMQQueue> cache = new LRUCache<ActiveMQDestination, ActiveMQQueue>();
 
@@ -54,6 +58,8 @@ public class VirtualTopicInterceptor extends DestinationFilter {
         this.local = virtualTopic.isLocal();
         this.concurrentSend = virtualTopic.isConcurrentSend();
         this.transactedSend = virtualTopic.isTransactedSend();
+        this.dropMessageOnResourceLimit = virtualTopic.isDropOnResourceLimit();
+        this.setOriginalDestination = virtualTopic.isSetOriginalDestination();
     }
 
     public Topic getTopic() {
@@ -91,7 +97,11 @@ public class VirtualTopicInterceptor extends DestinationFilter {
                             public void run() {
                                 try {
                                     if (exceptionAtomicReference.get() == null) {
-                                        dest.send(context, message.copy());
+                                        dest.send(context, copy(message, dest.getActiveMQDestination()));
+                                    }
+                                } catch (ResourceAllocationException e) {
+                                    if (!dropMessageOnResourceLimit) {
+                                        exceptionAtomicReference.set(e);
                                     }
                                 } catch (Exception e) {
                                     exceptionAtomicReference.set(e);
@@ -112,13 +122,28 @@ public class VirtualTopicInterceptor extends DestinationFilter {
             } else {
                 for (final Destination dest : destinations) {
                     if (shouldDispatch(broker, message, dest)) {
-                        dest.send(context, message.copy());
+                        try {
+                            dest.send(context, copy(message, dest.getActiveMQDestination()));
+                        } catch (ResourceAllocationException e) {
+                            if (!dropMessageOnResourceLimit) {
+                                throw e;
+                            }
+                        }
                     }
                 }
             }
         } finally {
             commit(localBrokerTransactionToCoalesceJournalSync, context.getConnectionContext(), message);
         }
+    }
+
+    private Message copy(Message original, ActiveMQDestination target) {
+        Message msg = original.copy();
+        if (setOriginalDestination) {
+            msg.setDestination(target);
+            msg.setOriginalDestination(original.getDestination());
+        }
+        return msg;
     }
 
     private LocalTransactionId beginLocalTransaction(int numDestinations, ConnectionContext connectionContext, Message message) throws Exception {
@@ -142,7 +167,8 @@ public class VirtualTopicInterceptor extends DestinationFilter {
     }
 
     protected boolean shouldDispatch(Broker broker, Message message, Destination dest) throws IOException {
-        return true;
+    	//if can't find .* in the prefix, default back to old logic and return true
+    	return prefix.contains(".*") && !prefix.startsWith("*") ? dest.getName().startsWith(prefix.substring(0, prefix.indexOf(".*"))) : true;
     }
 
     protected ActiveMQDestination getQueueConsumersWildcard(ActiveMQDestination original) {

@@ -63,17 +63,17 @@ public class ActiveMQSslConnectionFactoryTest {
         executeTest(SSL_TRANSPORT, TRUST_STORE_RESOURCE_PREFIX + TRUST_STORE_FILE_NAME + ".dummy");
     }
 
-    @Test(expected = ConnectException.class)
+    @Test(expected = IOException.class)
     public void validTrustStoreFileFailoverTest() throws Throwable {
         executeTest(FAILOVER_SSL_TRANSPORT, TRUST_STORE_DIRECTORY_NAME + TRUST_STORE_FILE_NAME);
     }
 
-    @Test(expected = ConnectException.class)
+    @Test(expected = IOException.class)
     public void validTrustStoreURLFailoverTest() throws Throwable {
         executeTest(FAILOVER_SSL_TRANSPORT, new File(TRUST_STORE_DIRECTORY_NAME + TRUST_STORE_FILE_NAME).toURI().toString());
     }
 
-    @Test(expected = ConnectException.class)
+    @Test(expected = IOException.class)
     public void validTrustStoreResourceFailoverTest() throws Throwable {
         executeTest(FAILOVER_SSL_TRANSPORT, TRUST_STORE_RESOURCE_PREFIX + TRUST_STORE_FILE_NAME);
     }
@@ -114,12 +114,16 @@ public class ActiveMQSslConnectionFactoryTest {
     }
 
     protected void executeTest(String transport, String name) throws Throwable {
-    	executeTest(transport, name, null);    	
+    	executeTest(transport, name, null);
+    }
+
+    protected ActiveMQSslConnectionFactory getFactory(String transport) {
+        return new ActiveMQSslConnectionFactory(transport);
     }
 
     protected void executeTest(String transport, String name, String type) throws Throwable {
         try {
-            ActiveMQSslConnectionFactory activeMQSslConnectionFactory = new ActiveMQSslConnectionFactory(transport);
+            ActiveMQSslConnectionFactory activeMQSslConnectionFactory = getFactory(transport);
             activeMQSslConnectionFactory.setTrustStoreType(type != null ? type : activeMQSslConnectionFactory.getTrustStoreType());
             activeMQSslConnectionFactory.setTrustStore(name);
             activeMQSslConnectionFactory.setTrustStorePassword(TRUST_STORE_PASSWORD);

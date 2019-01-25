@@ -22,11 +22,11 @@
   <parent>
     <groupId>org.apache.activemq</groupId>
     <artifactId>activemq-parent</artifactId>
-    <version>5.13-SNAPSHOT</version>
+    <version>5.16.0-SNAPSHOT</version>
   </parent>
 
   <artifactId>activemq-client</artifactId>
-  <packaging>jar</packaging>
+  <packaging>bundle</packaging>
   <name>ActiveMQ :: Client</name>
   <description>The ActiveMQ Client implementation</description>
 
@@ -94,6 +94,8 @@
         <artifactId>maven-javadoc-plugin</artifactId>
         <version>${maven-javadoc-plugin-version}</version>
         <configuration>
+          <!-- necessary for now under the javadocs can be fixed because jdk8 is much stricter -->
+          <additionalparam>${javadoc.options}</additionalparam>
           <links>
             <link>${javase-javadoc-url}</link>
             <link>${javaee-javadoc-url}</link>
@@ -308,7 +310,7 @@
               <tasks>
                 <echo>Running OpenWire Generator</echo>
                 <taskdef name="generate" classname="org.apache.activemq.openwire.tool.JavaGeneratorTask" classpathref="maven.compile.classpath" />
-                <generate version="11" basedir="${basedir}" generateTests="false" />
+                <generate version="12" basedir="${basedir}" generateTests="false" />
               </tasks>
             </configuration>
             <dependencies>

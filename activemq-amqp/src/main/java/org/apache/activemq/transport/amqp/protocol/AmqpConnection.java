@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
@@ -19,6 +19,7 @@ package org.apache.activemq.transport.amqp.protocol;
 import static org.apache.activemq.transport.amqp.AmqpSupport.ANONYMOUS_RELAY;
 import static org.apache.activemq.transport.amqp.AmqpSupport.CONNECTION_OPEN_FAILED;
 import static org.apache.activemq.transport.amqp.AmqpSupport.CONTAINER_ID;
+import static org.apache.activemq.transport.amqp.AmqpSupport.DELAYED_DELIVERY;
 import static org.apache.activemq.transport.amqp.AmqpSupport.INVALID_FIELD;
 import static org.apache.activemq.transport.amqp.AmqpSupport.PLATFORM;
 import static org.apache.activemq.transport.amqp.AmqpSupport.PRODUCT;
@@ -34,18 +35,20 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.ByteBuffer;
-import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.jms.InvalidClientIDException;
 
 import org.apache.activemq.broker.BrokerService;
+import org.apache.activemq.broker.region.AbstractRegion;
 import org.apache.activemq.broker.region.DurableTopicSubscription;
 import org.apache.activemq.broker.region.RegionBroker;
+import org.apache.activemq.broker.region.Subscription;
 import org.apache.activemq.broker.region.TopicRegion;
 import org.apache.activemq.command.ActiveMQDestination;
 import org.apache.activemq.command.ActiveMQTempDestination;
@@ -119,7 +122,7 @@ public class AmqpConnection implements AmqpProtocolConverter {
         BROKER_PLATFORM = "Java/" + (javaVersion == null ? "unknown" : javaVersion);
 
         InputStream in = null;
-        String version = "5.12.0";
+        String version = "<unknown-5.x>";
         if ((in = AmqpConnection.class.getResourceAsStream("/org/apache/activemq/version.txt")) != null) {
             BufferedReader reader = new BufferedReader(new InputStreamReader(in));
             try {
@@ -149,9 +152,9 @@ public class AmqpConnection implements AmqpProtocolConverter {
     private boolean closedSocket;
     private AmqpAuthenticator authenticator;
 
-    private final Map<TransactionId, AmqpTransactionCoordinator> transactions = new HashMap<TransactionId, AmqpTransactionCoordinator>();
-    private final ConcurrentMap<Integer, ResponseHandler> resposeHandlers = new ConcurrentHashMap<Integer, ResponseHandler>();
-    private final ConcurrentMap<ConsumerId, AmqpSender> subscriptionsByConsumerId = new ConcurrentHashMap<ConsumerId, AmqpSender>();
+    private final Map<TransactionId, AmqpTransactionCoordinator> transactions = new HashMap<>();
+    private final ConcurrentMap<Integer, ResponseHandler> resposeHandlers = new ConcurrentHashMap<>();
+    private final ConcurrentMap<ConsumerId, AmqpSender> subscriptionsByConsumerId = new ConcurrentHashMap<>();
 
     public AmqpConnection(AmqpTransport transport, BrokerService brokerService) {
         this.amqpTransport = transport;
@@ -168,10 +171,16 @@ public class AmqpConnection implements AmqpProtocolConverter {
         int maxFrameSize = amqpWireFormat.getMaxAmqpFrameSize();
         if (maxFrameSize > AmqpWireFormat.NO_AMQP_MAX_FRAME_SIZE) {
             this.protonTransport.setMaxFrameSize(maxFrameSize);
+            try {
+                this.protonTransport.setOutboundFrameSizeLimit(maxFrameSize);
+            } catch (Throwable e) {
+                // Ignore if older proton-j was injected.
+            }
         }
 
         this.protonTransport.bind(this.protonConnection);
         this.protonTransport.setChannelMax(CHANNEL_MAX);
+        this.protonTransport.setEmitFlowEventOnSend(false);
 
         this.protonConnection.collect(eventCollector);
 
@@ -185,7 +194,7 @@ public class AmqpConnection implements AmqpProtocolConverter {
      * @return the capabilities that are offered to new clients on connect.
      */
     protected Symbol[] getConnectionCapabilitiesOffered() {
-        return new Symbol[]{ ANONYMOUS_RELAY };
+        return new Symbol[]{ ANONYMOUS_RELAY, DELAYED_DELIVERY };
     }
 
     /**
@@ -195,7 +204,7 @@ public class AmqpConnection implements AmqpProtocolConverter {
      * @return the properties that are offered to the incoming connection.
      */
     protected Map<Symbol, Object> getConnetionProperties() {
-        Map<Symbol, Object> properties = new HashMap<Symbol, Object>();
+        Map<Symbol, Object> properties = new HashMap<>();
 
         properties.put(QUEUE_PREFIX, "queue://");
         properties.put(TOPIC_PREFIX, "topic://");
@@ -214,7 +223,7 @@ public class AmqpConnection implements AmqpProtocolConverter {
      * @return the properties that are offered to the incoming connection.
      */
     protected Map<Symbol, Object> getFailedConnetionProperties() {
-        Map<Symbol, Object> properties = new HashMap<Symbol, Object>();
+        Map<Symbol, Object> properties = new HashMap<>();
 
         properties.put(CONNECTION_OPEN_FAILED, true);
 
@@ -245,12 +254,18 @@ public class AmqpConnection implements AmqpProtocolConverter {
         LOG.trace("Performing connection:{} keep-alive processing", amqpTransport.getRemoteAddress());
 
         if (protonConnection.getLocalState() != EndpointState.CLOSED) {
-            rescheduleAt = protonTransport.tick(System.currentTimeMillis()) - System.currentTimeMillis();
+            // Using nano time since it is not related to the wall clock, which may change
+            long now = TimeUnit.NANOSECONDS.toMillis(System.nanoTime());
+            long deadline = protonTransport.tick(now);
             pumpProtonToSocket();
             if (protonTransport.isClosed()) {
-                rescheduleAt = 0;
                 LOG.debug("Transport closed after inactivity check.");
-                throw new InactivityIOException("Channel was inactive for to long");
+                throw new InactivityIOException("Channel was inactive for too long");
+            } else {
+                if(deadline != 0) {
+                    // caller treats 0 as no-work, ensure value is at least 1 as there was a deadline
+                    rescheduleAt = Math.max(deadline - now, 1);
+                }
             }
         }
 
@@ -306,7 +321,7 @@ public class AmqpConnection implements AmqpProtocolConverter {
             while (!done) {
                 ByteBuffer toWrite = protonTransport.getOutputBuffer();
                 if (toWrite != null && toWrite.hasRemaining()) {
-                    LOG.trace("Sending {} bytes out", toWrite.limit());
+                    LOG.trace("Server: Sending {} bytes out", toWrite.limit());
                     amqpTransport.sendToAmqp(toWrite);
                     protonTransport.outputConsumed();
                 } else {
@@ -318,13 +333,14 @@ public class AmqpConnection implements AmqpProtocolConverter {
         }
     }
 
+    @SuppressWarnings("deprecation")
     @Override
     public void onAMQPData(Object command) throws Exception {
         Buffer frame;
         if (command.getClass() == AmqpHeader.class) {
             AmqpHeader header = (AmqpHeader) command;
 
-            if (amqpWireFormat.isHeaderValid(header)) {
+            if (amqpWireFormat.isHeaderValid(header, authenticator != null)) {
                 LOG.trace("Connection from an AMQP v1.0 client initiated. {}", header);
             } else {
                 LOG.warn("Connection attempt from non AMQP v1.0 client. {}", header);
@@ -352,6 +368,8 @@ public class AmqpConnection implements AmqpProtocolConverter {
             LOG.debug("Ignoring incoming AMQP data, transport is closed.");
             return;
         }
+
+        LOG.trace("Server: Received from client: {} bytes", frame.getLength());
 
         while (frame.length > 0) {
             try {
@@ -383,7 +401,7 @@ public class AmqpConnection implements AmqpProtocolConverter {
             Event event = null;
             while ((event = eventCollector.peek()) != null) {
                 if (amqpTransport.isTrace()) {
-                    LOG.trace("Processing event: {}", event.getType());
+                    LOG.trace("Server: Processing event: {}", event.getType());
                 }
                 switch (event.getType()) {
                     case CONNECTION_REMOTE_OPEN:
@@ -470,7 +488,7 @@ public class AmqpConnection implements AmqpProtocolConverter {
                         } else if (exception instanceof InvalidClientIDException) {
                             ErrorCondition condition = new ErrorCondition(AmqpError.INVALID_FIELD, exception.getMessage());
 
-                            Map<Symbol, Object> infoMap = new HashMap<Symbol, Object> ();
+                            Map<Symbol, Object> infoMap = new HashMap<> ();
                             infoMap.put(INVALID_FIELD, CONTAINER_ID);
                             condition.setInfo(infoMap);
 
@@ -481,7 +499,6 @@ public class AmqpConnection implements AmqpProtocolConverter {
 
                         protonConnection.close();
                     } else {
-
                         if (amqpTransport.isUseInactivityMonitor() && amqpWireFormat.getIdleTimeout() > 0) {
                             LOG.trace("Connection requesting Idle timeout of: {} mills", amqpWireFormat.getIdleTimeout());
                             protonTransport.setIdleTimeout(amqpWireFormat.getIdleTimeout());
@@ -489,6 +506,7 @@ public class AmqpConnection implements AmqpProtocolConverter {
 
                         protonConnection.setOfferedCapabilities(getConnectionCapabilitiesOffered());
                         protonConnection.setProperties(getConnetionProperties());
+                        protonConnection.setContainer(brokerService.getBrokerName());
                         protonConnection.open();
 
                         configureInactivityMonitor();
@@ -706,6 +724,17 @@ public class AmqpConnection implements AmqpProtocolConverter {
         return result;
     }
 
+
+    Subscription lookupPrefetchSubscription(ConsumerInfo consumerInfo)  {
+        Subscription subscription = null;
+        try {
+            subscription = ((AbstractRegion)((RegionBroker) brokerService.getBroker().getAdaptor(RegionBroker.class)).getRegion(consumerInfo.getDestination())).getSubscriptions().get(consumerInfo.getConsumerId());
+        } catch (Exception e) {
+            LOG.warn("Error finding subscription for: " + consumerInfo + ": " + e.getMessage(), false, e);
+        }
+        return subscription;
+    }
+
     ActiveMQDestination createTemporaryDestination(final Link link, Symbol[] capabilities) {
         ActiveMQDestination rc = null;
         if (contains(capabilities, TEMP_TOPIC_CAPABILITY)) {
@@ -813,10 +842,14 @@ public class AmqpConnection implements AmqpProtocolConverter {
         // If either end has idle timeout requirements then the tick method
         // will give us a deadline on the next time we need to tick() in order
         // to meet those obligations.
-        long nextIdleCheck = protonTransport.tick(System.currentTimeMillis());
-        if (nextIdleCheck > 0) {
-            LOG.trace("Connection keep-alive processing starts at: {}", new Date(nextIdleCheck));
-            monitor.startKeepAliveTask(nextIdleCheck - System.currentTimeMillis());
+        // Using nano time since it is not related to the wall clock, which may change
+        long now = TimeUnit.NANOSECONDS.toMillis(System.nanoTime());
+        long nextIdleCheck = protonTransport.tick(now);
+        if (nextIdleCheck != 0) {
+            // monitor treats <= 0 as no work, ensure value is at least 1 as there was a deadline
+            long delay = Math.max(nextIdleCheck - now, 1);
+            LOG.trace("Connection keep-alive processing starts in: {}", delay);
+            monitor.startKeepAliveTask(delay);
         } else {
             LOG.trace("Connection does not require keep-alive processing");
         }

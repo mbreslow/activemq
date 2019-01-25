@@ -47,10 +47,12 @@ import org.slf4j.LoggerFactory;
     private String sqlExceptionMessage = ""; // match all
     private long resumeCheckSleepPeriod = 5*1000;
     private final AtomicBoolean handlingException = new AtomicBoolean(false);
+    private boolean systemExitOnShutdown = false;
 
     @Override
     public void handle(IOException exception) {
-        if (ignoreAllErrors) {
+        if (!broker.isStarted() || ignoreAllErrors) {
+            allowIOResumption();
             LOG.info("Ignoring IO exception, " + exception, exception);
             return;
         }
@@ -61,6 +63,7 @@ import org.slf4j.LoggerFactory;
                 String message = cause.getMessage();
                 if (message != null && message.contains(noSpaceMessage)) {
                     LOG.info("Ignoring no space left exception, " + exception, exception);
+                    allowIOResumption();
                     return;
                 }
                 cause = cause.getCause();
@@ -105,6 +108,7 @@ import org.slf4j.LoggerFactory;
                                 @Override
                                 public void run() {
                                     try {
+                                        allowIOResumption();
                                         while (hasLockOwnership() && isPersistenceAdapterDown()) {
                                             LOG.info("waiting for broker persistence adapter checkpoint to succeed before restarting transports");
                                             TimeUnit.MILLISECONDS.sleep(resumeCheckSleepPeriod);
@@ -116,7 +120,7 @@ import org.slf4j.LoggerFactory;
                                                 if (destination instanceof Queue) {
                                                     Queue queue = (Queue)destination;
                                                     if (queue.isResetNeeded()) {
-                                                        queue.clearPendingMessages();
+                                                        queue.clearPendingMessages(0);
                                                     }
                                                 }
                                             }
@@ -161,6 +165,16 @@ import org.slf4j.LoggerFactory;
         throw new SuppressReplyException("ShutdownBrokerInitiated", exception);
     }
 
+    protected void allowIOResumption() {
+        try {
+            if (broker.getPersistenceAdapter() != null) {
+                broker.getPersistenceAdapter().allowIOResumption();
+            }
+        } catch (IOException e) {
+            LOG.warn("Failed to allow IO resumption", e);
+        }
+    }
+
     private void stopBroker(Exception exception) {
         LOG.info("Stopping " + broker + " due to exception, " + exception, exception);
         new Thread("IOExceptionHandler: stopping " + broker) {
@@ -170,6 +184,7 @@ import org.slf4j.LoggerFactory;
                     if( broker.isRestartAllowed() ) {
                         broker.requestRestart();
                     }
+                    broker.setSystemExitOnShutdown(isSystemExitOnShutdown());
                     broker.stop();
                 } catch (Exception e) {
                     LOG.warn("Failure occurred while stopping broker", e);
@@ -241,5 +256,13 @@ import org.slf4j.LoggerFactory;
 
     public void setResumeCheckSleepPeriod(long resumeCheckSleepPeriod) {
         this.resumeCheckSleepPeriod = resumeCheckSleepPeriod;
+    }
+
+    public void setSystemExitOnShutdown(boolean systemExitOnShutdown) {
+        this.systemExitOnShutdown = systemExitOnShutdown;
+    }
+
+    public boolean isSystemExitOnShutdown() {
+        return systemExitOnShutdown;
     }
 }

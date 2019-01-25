@@ -17,7 +17,6 @@
 package org.apache.activemq.camel.component;
 
 import java.lang.reflect.Constructor;
-
 import javax.jms.ConnectionFactory;
 
 import org.apache.activemq.Service;
@@ -32,12 +31,11 @@ import org.springframework.transaction.PlatformTransactionManager;
  *
  */
 public class ActiveMQConfiguration extends JmsConfiguration {
+    private ActiveMQComponent activeMQComponent;
     private String brokerURL = ActiveMQConnectionFactory.DEFAULT_BROKER_URL;
     private boolean useSingleConnection = false;
     private boolean usePooledConnection = true;
-    private String userName;
-    private String password;
-    private ActiveMQComponent activeMQComponent;
+    private boolean trustAllPackages;
 
     public ActiveMQConfiguration() {
     }
@@ -60,29 +58,22 @@ public class ActiveMQConfiguration extends JmsConfiguration {
         return useSingleConnection;
     }
 
+    /**
+     * @deprecated - use JmsConfiguration#getUsername()
+     * @see JmsConfiguration#getUsername()
+     */
+    @Deprecated
     public String getUserName() {
-        return userName;
+        return getUsername();
     }
 
     /**
-     * Sets the username to be used to login to ActiveMQ
-     * @param userName
+     * @deprecated - use JmsConfiguration#setUsername(String)
+     * @see JmsConfiguration#setUsername(String)
      */
+    @Deprecated
     public void setUserName(String userName) {
-        this.userName = userName;
-    }
-
-    public String getPassword() {
-        return password;
-    }
-
-    /**
-     * Sets the password/passcode used to login to ActiveMQ
-     *
-     * @param password
-     */
-    public void setPassword(String password) {
-        this.password = password;
+        setUsername(userName);
     }
 
     /**
@@ -92,8 +83,6 @@ public class ActiveMQConfiguration extends JmsConfiguration {
      * for each message then close them all down again.
      * <p/>
      * The default value is false and a pooled connection is used by default.
-     *
-     * @param useSingleConnection
      */
     public void setUseSingleConnection(boolean useSingleConnection) {
         this.useSingleConnection = useSingleConnection;
@@ -115,6 +104,24 @@ public class ActiveMQConfiguration extends JmsConfiguration {
         this.usePooledConnection = usePooledConnection;
     }
 
+    public boolean isTrustAllPackages() {
+        return trustAllPackages;
+    }
+
+    /**
+     * ObjectMessage objects depend on Java serialization of marshal/unmarshal object payload.
+     * This process is generally considered unsafe as malicious payload can exploit the host system.
+     * That's why starting with versions 5.12.2 and 5.13.0, ActiveMQ enforces users to explicitly whitelist packages
+     * that can be exchanged using ObjectMessages.
+     * <br/>
+     * This option can be set to <tt>true</tt> to trust all packages (eg whitelist is *).
+     * <p/>
+     * See more details at: http://activemq.apache.org/objectmessage.html
+     */
+    public void setTrustAllPackages(boolean trustAllPackages) {
+        this.trustAllPackages = trustAllPackages;
+    }
+
     /**
      * Factory method to create a default transaction manager if one is not specified
      */
@@ -132,11 +139,12 @@ public class ActiveMQConfiguration extends JmsConfiguration {
     @Override
     protected ConnectionFactory createConnectionFactory() {
         ActiveMQConnectionFactory answer = new ActiveMQConnectionFactory();
-        if (userName != null) {
-            answer.setUserName(userName);
+        answer.setTrustAllPackages(trustAllPackages);
+        if (getUsername() != null) {
+            answer.setUserName(getUsername());
         }
-        if (password != null) {
-            answer.setPassword(password);
+        if (getPassword() != null) {
+            answer.setPassword(getPassword());
         }
         if (answer.getBeanName() == null) {
             answer.setBeanName("Camel");

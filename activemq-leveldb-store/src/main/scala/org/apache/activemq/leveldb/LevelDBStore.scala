@@ -87,7 +87,7 @@ class LevelDBStoreTest(val store:LevelDBStore) extends LevelDBStoreTestMBean {
 
   import store._
   var suspendForce = false;
-  
+
   override def setSuspendForce(value: Boolean): Unit = this.synchronized {
     if( suspendForce!=value ) {
       suspendForce = value;
@@ -129,7 +129,7 @@ class LevelDBStoreTest(val store:LevelDBStore) extends LevelDBStoreTestMBean {
   }
 
   var suspendDelete = false;
-  
+
   override def setSuspendDelete(value: Boolean): Unit = this.synchronized {
     if( suspendDelete!=value ) {
       suspendDelete = value;
@@ -147,8 +147,8 @@ class LevelDBStoreTest(val store:LevelDBStore) extends LevelDBStoreTestMBean {
 
   override def getDeleteCalls = this.synchronized {
     db.client.log.recordLogTestSupport.deleteCall.threads.get()
-  }  
-  
+  }
+
 }
 
 class LevelDBStoreView(val store:LevelDBStore) extends LevelDBStoreViewMBean {
@@ -754,11 +754,12 @@ class LevelDBStore extends LockableServiceSupport with BrokerServiceAware with P
 
     def doAdd(uow: DelayableUOW, context: ConnectionContext, message: Message, delay:Boolean): CountDownFuture[AnyRef] = {
       check_running
+      message.beforeMarshall(wireFormat);
       message.incrementReferenceCount()
       uow.addCompleteListener({
         message.decrementReferenceCount()
       })
-      val sequence = lastSeq.synchronized {
+      lastSeq.synchronized {
         val seq = lastSeq.incrementAndGet()
         message.getMessageId.setFutureOrSequenceLong(seq);
         // null context on xa recovery, we want to bypass the cursor & pending adds as it will be reset
@@ -768,9 +769,8 @@ class LevelDBStore extends LockableServiceSupport with BrokerServiceAware with P
             def run(): Unit = pendingCursorAdds.synchronized { pendingCursorAdds.remove(seq) }
           }))
         }
-        seq
+        uow.enqueue(key, seq, message, delay)
       }
-      uow.enqueue(key, sequence, message, delay)
     }
 
     override def asyncAddQueueMessage(context: ConnectionContext, message: Message) = asyncAddQueueMessage(context, message, false)
@@ -901,6 +901,12 @@ class LevelDBStore extends LockableServiceSupport with BrokerServiceAware with P
       super.asyncAddQueueMessage(context, message, false)
     }
 
+    var stats = new MessageStoreSubscriptionStatistics(false)
+
+    def getMessageStoreSubStatistics: MessageStoreSubscriptionStatistics = {
+        stats;
+    }
+
     def subscription_count = subscriptions.synchronized {
       subscriptions.size
     }
@@ -1008,7 +1014,7 @@ class LevelDBStore extends LockableServiceSupport with BrokerServiceAware with P
         case None => 0
       }
     }
-    
+
     def getMessageSize(clientId: String, subscriptionName: String): Long = {
       check_running
       return 0
@@ -1141,4 +1147,6 @@ class LevelDBStore extends LockableServiceSupport with BrokerServiceAware with P
   def rollbackTransaction(context: ConnectionContext): Unit = {}
 
   def createClient = new LevelDBClient(this);
+
+  def allowIOResumption() = {}
 }

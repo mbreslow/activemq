@@ -17,11 +17,8 @@
 package org.apache.activemq.broker.jmx;
 
 import java.io.IOException;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
+import java.util.*;
 import java.util.Map.Entry;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.ExecutorService;
@@ -327,8 +324,9 @@ public class ManagedRegionBroker extends RegionBroker {
             }
         }
         try {
-            AsyncAnnotatedMBean.registerMBean(asyncInvokeService, mbeanTimeout, managementContext, view, key);
-            registeredMBeans.add(key);
+            if (AsyncAnnotatedMBean.registerMBean(asyncInvokeService, mbeanTimeout, managementContext, view, key) != null) {
+                registeredMBeans.add(key);
+            }
         } catch (Throwable e) {
             LOG.warn("Failed to register MBean {}", key);
             LOG.debug("Failure reason: ", e);
@@ -383,8 +381,9 @@ public class ManagedRegionBroker extends RegionBroker {
         }
 
         try {
-            AsyncAnnotatedMBean.registerMBean(asyncInvokeService, mbeanTimeout, managementContext, view, key);
-            registeredMBeans.add(key);
+            if (AsyncAnnotatedMBean.registerMBean(asyncInvokeService, mbeanTimeout, managementContext, view, key) != null) {
+                registeredMBeans.add(key);
+            }
         } catch (Throwable e) {
             LOG.warn("Failed to register MBean {}", key);
             LOG.debug("Failure reason: ", e);
@@ -447,8 +446,9 @@ public class ManagedRegionBroker extends RegionBroker {
         }
 
         try {
-            AsyncAnnotatedMBean.registerMBean(asyncInvokeService, mbeanTimeout, managementContext, view, key);
-            registeredMBeans.add(key);
+            if (AsyncAnnotatedMBean.registerMBean(asyncInvokeService, mbeanTimeout, managementContext, view, key) != null) {
+                registeredMBeans.add(key);
+            }
         } catch (Throwable e) {
             LOG.warn("Failed to register MBean {}", key);
             LOG.debug("Failure reason: ", e);
@@ -523,8 +523,9 @@ public class ManagedRegionBroker extends RegionBroker {
             SubscriptionView view = new InactiveDurableSubscriptionView(this, brokerService, key.getClientId(), info, subscription);
 
             try {
-                AsyncAnnotatedMBean.registerMBean(asyncInvokeService, mbeanTimeout, managementContext, view, objectName);
-                registeredMBeans.add(objectName);
+                if (AsyncAnnotatedMBean.registerMBean(asyncInvokeService, mbeanTimeout, managementContext, view, objectName) != null) {
+                    registeredMBeans.add(objectName);
+                }
             } catch (Throwable e) {
                 LOG.warn("Failed to register MBean {}", key);
                 LOG.debug("Failure reason: ", e);
@@ -607,9 +608,23 @@ public class ManagedRegionBroker extends RegionBroker {
         return destination;
     }
 
+    private ObjectName[] onlyNonSuppressed (Set<ObjectName> set){
+        List<ObjectName> nonSuppressed = new ArrayList<ObjectName>();
+        for(ObjectName key : set){
+            if (managementContext.isAllowedToRegister(key)){
+                nonSuppressed.add(key);
+            }
+        }
+        return nonSuppressed.toArray(new ObjectName[nonSuppressed.size()]);
+    }
+
     protected ObjectName[] getTopics() {
         Set<ObjectName> set = topics.keySet();
         return set.toArray(new ObjectName[set.size()]);
+    }
+
+    protected ObjectName[] getTopicsNonSuppressed() {
+        return onlyNonSuppressed(topics.keySet());
     }
 
     protected ObjectName[] getQueues() {
@@ -617,9 +632,17 @@ public class ManagedRegionBroker extends RegionBroker {
         return set.toArray(new ObjectName[set.size()]);
     }
 
+    protected ObjectName[] getQueuesNonSuppressed() {
+        return onlyNonSuppressed(queues.keySet());
+    }
+
     protected ObjectName[] getTemporaryTopics() {
         Set<ObjectName> set = temporaryTopics.keySet();
         return set.toArray(new ObjectName[set.size()]);
+    }
+
+    protected ObjectName[] getTemporaryTopicsNonSuppressed() {
+        return onlyNonSuppressed(temporaryTopics.keySet());
     }
 
     protected ObjectName[] getTemporaryQueues() {
@@ -627,9 +650,17 @@ public class ManagedRegionBroker extends RegionBroker {
         return set.toArray(new ObjectName[set.size()]);
     }
 
+    protected ObjectName[] getTemporaryQueuesNonSuppressed() {
+        return onlyNonSuppressed(temporaryQueues.keySet());
+    }
+
     protected ObjectName[] getTopicSubscribers() {
         Set<ObjectName> set = topicSubscribers.keySet();
         return set.toArray(new ObjectName[set.size()]);
+    }
+
+    protected ObjectName[] getTopicSubscribersNonSuppressed() {
+        return onlyNonSuppressed(topicSubscribers.keySet());
     }
 
     protected ObjectName[] getDurableTopicSubscribers() {
@@ -637,9 +668,17 @@ public class ManagedRegionBroker extends RegionBroker {
         return set.toArray(new ObjectName[set.size()]);
     }
 
+    protected ObjectName[] getDurableTopicSubscribersNonSuppressed() {
+        return onlyNonSuppressed(durableTopicSubscribers.keySet());
+    }
+
     protected ObjectName[] getQueueSubscribers() {
         Set<ObjectName> set = queueSubscribers.keySet();
         return set.toArray(new ObjectName[set.size()]);
+    }
+
+    protected ObjectName[] getQueueSubscribersNonSuppressed() {
+        return onlyNonSuppressed(queueSubscribers.keySet());
     }
 
     protected ObjectName[] getTemporaryTopicSubscribers() {
@@ -647,9 +686,17 @@ public class ManagedRegionBroker extends RegionBroker {
         return set.toArray(new ObjectName[set.size()]);
     }
 
+    protected ObjectName[] getTemporaryTopicSubscribersNonSuppressed() {
+        return onlyNonSuppressed(temporaryTopicSubscribers.keySet());
+    }
+
     protected ObjectName[] getTemporaryQueueSubscribers() {
         Set<ObjectName> set = temporaryQueueSubscribers.keySet();
         return set.toArray(new ObjectName[set.size()]);
+    }
+
+    protected ObjectName[] getTemporaryQueueSubscribersNonSuppressed() {
+        return onlyNonSuppressed(temporaryQueueSubscribers.keySet());
     }
 
     protected ObjectName[] getInactiveDurableTopicSubscribers() {
@@ -657,9 +704,17 @@ public class ManagedRegionBroker extends RegionBroker {
         return set.toArray(new ObjectName[set.size()]);
     }
 
+    protected ObjectName[] getInactiveDurableTopicSubscribersNonSuppressed() {
+        return onlyNonSuppressed(inactiveDurableTopicSubscribers.keySet());
+    }
+
     protected ObjectName[] getTopicProducers() {
         Set<ObjectName> set = topicProducers.keySet();
         return set.toArray(new ObjectName[set.size()]);
+    }
+
+    protected ObjectName[] getTopicProducersNonSuppressed() {
+        return onlyNonSuppressed(topicProducers.keySet());
     }
 
     protected ObjectName[] getQueueProducers() {
@@ -667,9 +722,17 @@ public class ManagedRegionBroker extends RegionBroker {
         return set.toArray(new ObjectName[set.size()]);
     }
 
+    protected ObjectName[] getQueueProducersNonSuppressed() {
+        return onlyNonSuppressed(queueProducers.keySet());
+    }
+
     protected ObjectName[] getTemporaryTopicProducers() {
         Set<ObjectName> set = temporaryTopicProducers.keySet();
         return set.toArray(new ObjectName[set.size()]);
+    }
+
+    protected ObjectName[] getTemporaryTopicProducersNonSuppressed() {
+        return onlyNonSuppressed(temporaryTopicProducers.keySet());
     }
 
     protected ObjectName[] getTemporaryQueueProducers() {
@@ -677,9 +740,17 @@ public class ManagedRegionBroker extends RegionBroker {
         return set.toArray(new ObjectName[set.size()]);
     }
 
+    protected ObjectName[] getTemporaryQueueProducersNonSuppressed() {
+        return onlyNonSuppressed(temporaryQueueProducers.keySet());
+    }
+
     protected ObjectName[] getDynamicDestinationProducers() {
         Set<ObjectName> set = dynamicDestinationProducers.keySet();
         return set.toArray(new ObjectName[set.size()]);
+    }
+
+    protected ObjectName[] getDynamicDestinationProducersNonSuppressed() {
+        return onlyNonSuppressed(dynamicDestinationProducers.keySet());
     }
 
     public Broker getContextBroker() {
@@ -703,8 +774,9 @@ public class ManagedRegionBroker extends RegionBroker {
                     view = new AbortSlowConsumerStrategyView(this, strategy);
                 }
 
-                AsyncAnnotatedMBean.registerMBean(asyncInvokeService, mbeanTimeout, managementContext, view, objectName);
-                registeredMBeans.add(objectName);
+                if (AsyncAnnotatedMBean.registerMBean(asyncInvokeService, mbeanTimeout, managementContext, view, objectName) != null) {
+                    registeredMBeans.add(objectName);
+                }
             }
         } catch (Exception e) {
             LOG.warn("Failed to register MBean {}", strategy);
@@ -718,8 +790,9 @@ public class ManagedRegionBroker extends RegionBroker {
             ObjectName objectName = BrokerMBeanSupport.createXATransactionName(brokerObjectName, transaction);
             if (!registeredMBeans.contains(objectName))  {
                 RecoveredXATransactionView view = new RecoveredXATransactionView(this, transaction);
-                AsyncAnnotatedMBean.registerMBean(asyncInvokeService, mbeanTimeout, managementContext, view, objectName);
-                registeredMBeans.add(objectName);
+                if (AsyncAnnotatedMBean.registerMBean(asyncInvokeService, mbeanTimeout, managementContext, view, objectName) != null) {
+                    registeredMBeans.add(objectName);
+                }
             }
         } catch (Exception e) {
             LOG.warn("Failed to register prepared transaction MBean {}", transaction);
@@ -760,5 +833,18 @@ public class ManagedRegionBroker extends RegionBroker {
 
     public Map<ObjectName, DestinationView> getQueueViews() {
         return queues;
+    }
+
+    public Map<ObjectName, DestinationView> getTopicViews() {
+        return topics;
+    }
+
+    public DestinationView getQueueView(String queueName) throws MalformedObjectNameException {
+        ObjectName objName = BrokerMBeanSupport.createDestinationName(brokerObjectName.toString(), "Queue", queueName);
+        return queues.get(objName);
+    }
+
+    public Set<ObjectName> getRegisteredMbeans() {
+        return registeredMBeans;
     }
 }

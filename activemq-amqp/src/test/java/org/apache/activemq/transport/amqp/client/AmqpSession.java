@@ -16,13 +16,20 @@
  */
 package org.apache.activemq.transport.amqp.client;
 
+import java.io.IOException;
+import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
+import org.apache.activemq.transport.amqp.client.util.AsyncResult;
 import org.apache.activemq.transport.amqp.client.util.ClientFuture;
-import org.apache.activemq.transport.amqp.client.util.UnmodifiableSession;
+import org.apache.activemq.transport.amqp.client.util.UnmodifiableProxy;
+import org.apache.qpid.proton.amqp.Symbol;
 import org.apache.qpid.proton.amqp.messaging.Source;
 import org.apache.qpid.proton.amqp.messaging.Target;
+import org.apache.qpid.proton.amqp.transport.ReceiverSettleMode;
+import org.apache.qpid.proton.amqp.transport.SenderSettleMode;
 import org.apache.qpid.proton.engine.Connection;
 import org.apache.qpid.proton.engine.Session;
 
@@ -36,6 +43,8 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
 
     private final AmqpConnection connection;
     private final String sessionId;
+    private final AmqpTransactionContext txContext;
+    private final AtomicBoolean closed = new AtomicBoolean();
 
     /**
      * Create a new session instance.
@@ -48,6 +57,41 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
     public AmqpSession(AmqpConnection connection, String sessionId) {
         this.connection = connection;
         this.sessionId = sessionId;
+        this.txContext = new AmqpTransactionContext(this);
+    }
+
+    /**
+     * Close the receiver, a closed receiver will throw exceptions if any further send
+     * calls are made.
+     *
+     * @throws IOException if an error occurs while closing the receiver.
+     */
+    public void close() throws IOException {
+        if (closed.compareAndSet(false, true)) {
+            final ClientFuture request = new ClientFuture();
+            getScheduler().execute(new Runnable() {
+
+                @Override
+                public void run() {
+                    checkClosed();
+                    close(request);
+                    pumpToProtonTransport(request);
+                }
+            });
+
+            request.sync();
+        }
+    }
+
+    /**
+     * Create an anonymous sender.
+     *
+     * @return a newly created sender that is ready for use.
+     *
+     * @throws Exception if an error occurs while creating the sender.
+     */
+    public AmqpSender createSender() throws Exception {
+        return createSender(null, false, null, null, null);
     }
 
     /**
@@ -61,14 +105,30 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
      * @throws Exception if an error occurs while creating the sender.
      */
     public AmqpSender createSender(final String address) throws Exception {
-        return createSender(address, false);
+        return createSender(address, false, null, null, null);
     }
 
     /**
      * Create a sender instance using the given address
      *
      * @param address
-     * 	      the address to which the sender will produce its messages.
+     *        the address to which the sender will produce its messages.
+     * @param desiredCapabilities
+     *        the capabilities that the caller wants the remote to support.
+     *
+     * @return a newly created sender that is ready for use.
+     *
+     * @throws Exception if an error occurs while creating the sender.
+     */
+    public AmqpSender createSender(final String address, Symbol[] desiredCapabilities) throws Exception {
+        return createSender(address, false, desiredCapabilities, null, null);
+    }
+
+    /**
+     * Create a sender instance using the given address
+     *
+     * @param address
+     *        the address to which the sender will produce its messages.
      * @param presettle
      *        controls if the created sender produces message that have already been marked settled.
      *
@@ -77,10 +137,27 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
      * @throws Exception if an error occurs while creating the sender.
      */
     public AmqpSender createSender(final String address, boolean presettle) throws Exception {
+        return createSender(address, presettle, null, null, null);
+    }
+
+    /**
+     * Create a sender instance using the given address
+     *
+     * @param address
+     *        the address to which the sender will produce its messages.
+     * @param senderSettlementMode
+     *        controls the settlement mode used by the created Sender
+     * @param receiverSettlementMode
+     *        controls the desired settlement mode used by the remote Receiver
+     *
+     * @return a newly created sender that is ready for use.
+     *
+     * @throws Exception if an error occurs while creating the sender.
+     */
+    public AmqpSender createSender(final String address, final SenderSettleMode senderMode, ReceiverSettleMode receiverMode) throws Exception {
         checkClosed();
 
-        final AmqpSender sender = new AmqpSender(AmqpSession.this, address, getNextSenderId());
-        sender.setPresettle(presettle);
+        final AmqpSender sender = new AmqpSender(AmqpSession.this, address, getNextSenderId(), senderMode, receiverMode);
         final ClientFuture request = new ClientFuture();
 
         connection.getScheduler().execute(new Runnable() {
@@ -90,7 +167,52 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
                 checkClosed();
                 sender.setStateInspector(getStateInspector());
                 sender.open(request);
-                pumpToProtonTransport();
+                pumpToProtonTransport(request);
+            }
+        });
+
+        request.sync();
+
+        return sender;
+    }
+
+    /**
+     * Create a sender instance using the given address
+     *
+     * @param address
+     * 	      the address to which the sender will produce its messages.
+     * @param presettle
+     *        controls if the created sender produces message that have already been marked settled.
+     * @param desiredCapabilities
+     *        the capabilities that the caller wants the remote to support.
+     * @param offeredCapabilities
+     *        the capabilities that the caller wants the advertise support for.
+     * @param properties
+     *        the properties to send as part of the sender open.
+     *
+     * @return a newly created sender that is ready for use.
+     *
+     * @throws Exception if an error occurs while creating the sender.
+     */
+    public AmqpSender createSender(final String address, boolean presettle, Symbol[] desiredCapabilities, Symbol[] offeredCapabilities, Map<Symbol, Object> properties) throws Exception {
+        checkClosed();
+
+        final AmqpSender sender = new AmqpSender(AmqpSession.this, address, getNextSenderId());
+        sender.setPresettle(presettle);
+        sender.setDesiredCapabilities(desiredCapabilities);
+        sender.setOfferedCapabilities(offeredCapabilities);
+        sender.setProperties(properties);
+
+        final ClientFuture request = new ClientFuture();
+
+        connection.getScheduler().execute(new Runnable() {
+
+            @Override
+            public void run() {
+                checkClosed();
+                sender.setStateInspector(getStateInspector());
+                sender.open(request);
+                pumpToProtonTransport(request);
             }
         });
 
@@ -103,16 +225,58 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
      * Create a sender instance using the given Target
      *
      * @param target
-     *        the caller created and configured Traget used to create the sender link.
+     *        the caller created and configured Target used to create the sender link.
      *
      * @return a newly created sender that is ready for use.
      *
      * @throws Exception if an error occurs while creating the receiver.
      */
     public AmqpSender createSender(Target target) throws Exception {
+        return createSender(target, getNextSenderId());
+    }
+
+    /**
+     * Create a sender instance using the given Target
+     *
+     * @param target
+     *        the caller created and configured Target used to create the sender link.
+     * @param sender
+     *        the sender ID to assign to the newly created Sender.
+     *
+     * @return a newly created sender that is ready for use.
+     *
+     * @throws Exception if an error occurs while creating the receiver.
+     */
+    public AmqpSender createSender(Target target, String senderId) throws Exception {
+        return createSender(target, senderId, null, null, null);
+    }
+
+    /**
+     * Create a sender instance using the given Target
+     *
+     * @param target
+     *        the caller created and configured Target used to create the sender link.
+     * @param sender
+     *        the sender ID to assign to the newly created Sender.
+     * @param desiredCapabilities
+     *        the capabilities that the caller wants the remote to support.
+     * @param offeredCapabilities
+     *        the capabilities that the caller wants the advertise support for.
+     * @param properties
+     *        the properties to send as part of the sender open.
+     *
+     * @return a newly created sender that is ready for use.
+     *
+     * @throws Exception if an error occurs while creating the receiver.
+     */
+    public AmqpSender createSender(Target target, String senderId, Symbol[] desiredCapabilities, Symbol[] offeredCapabilities, Map<Symbol, Object> properties) throws Exception {
         checkClosed();
 
-        final AmqpSender sender = new AmqpSender(AmqpSession.this, target, getNextSenderId());
+        final AmqpSender sender = new AmqpSender(AmqpSession.this, target, senderId);
+        sender.setDesiredCapabilities(desiredCapabilities);
+        sender.setOfferedCapabilities(offeredCapabilities);
+        sender.setProperties(properties);
+
         final ClientFuture request = new ClientFuture();
 
         connection.getScheduler().execute(new Runnable() {
@@ -122,7 +286,7 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
                 checkClosed();
                 sender.setStateInspector(getStateInspector());
                 sender.open(request);
-                pumpToProtonTransport();
+                pumpToProtonTransport(request);
             }
         });
 
@@ -176,12 +340,33 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
      * @throws Exception if an error occurs while creating the receiver.
      */
     public AmqpReceiver createReceiver(String address, String selector, boolean noLocal) throws Exception {
+        return createReceiver(address, selector, noLocal, false);
+    }
+
+    /**
+     * Create a receiver instance using the given address
+     *
+     * @param address
+     *        the address to which the receiver will subscribe for its messages.
+     * @param selector
+     *        the JMS selector to use for the subscription
+     * @param noLocal
+     *        should the subscription have messages from its connection filtered.
+     * @param presettle
+     *        should the receiver be created with a settled sender mode.
+     *
+     * @return a newly created receiver that is ready for use.
+     *
+     * @throws Exception if an error occurs while creating the receiver.
+     */
+    public AmqpReceiver createReceiver(String address, String selector, boolean noLocal, boolean presettle) throws Exception {
         checkClosed();
 
         final ClientFuture request = new ClientFuture();
         final AmqpReceiver receiver = new AmqpReceiver(AmqpSession.this, address, getNextReceiverId());
 
         receiver.setNoLocal(noLocal);
+        receiver.setPresettle(presettle);
         if (selector != null && !selector.isEmpty()) {
             receiver.setSelector(selector);
         }
@@ -193,7 +378,43 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
                 checkClosed();
                 receiver.setStateInspector(getStateInspector());
                 receiver.open(request);
-                pumpToProtonTransport();
+                pumpToProtonTransport(request);
+            }
+        });
+
+        request.sync();
+
+        return receiver;
+    }
+
+    /**
+     * Create a receiver instance using the given address
+     *
+     * @param address
+     *        the address to which the receiver will subscribe for its messages.
+     * @param senderSettlementMode
+     *        controls the desired settlement mode used by the remote Sender
+     * @param receiverSettlementMode
+     *        controls the settlement mode used by the created Receiver
+     *
+     * @return a newly created receiver that is ready for use.
+     *
+     * @throws Exception if an error occurs while creating the receiver.
+     */
+    public AmqpReceiver createReceiver(String address, SenderSettleMode senderMode, ReceiverSettleMode receiverMode) throws Exception {
+        checkClosed();
+
+        final ClientFuture request = new ClientFuture();
+        final AmqpReceiver receiver = new AmqpReceiver(AmqpSession.this, address, getNextReceiverId(), senderMode, receiverMode);
+
+        connection.getScheduler().execute(new Runnable() {
+
+            @Override
+            public void run() {
+                checkClosed();
+                receiver.setStateInspector(getStateInspector());
+                receiver.open(request);
+                pumpToProtonTransport(request);
             }
         });
 
@@ -213,6 +434,22 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
      * @throws Exception if an error occurs while creating the receiver.
      */
     public AmqpReceiver createReceiver(Source source) throws Exception {
+        return createReceiver(source, getNextReceiverId());
+    }
+
+    /**
+     * Create a receiver instance using the given Source
+     *
+     * @param source
+     *        the caller created and configured Source used to create the receiver link.
+     * @param receivedId
+     *        the ID value to assign to the newly created receiver
+     *
+     * @return a newly created receiver that is ready for use.
+     *
+     * @throws Exception if an error occurs while creating the receiver.
+     */
+    public AmqpReceiver createReceiver(Source source, String receiverId) throws Exception {
         checkClosed();
 
         final ClientFuture request = new ClientFuture();
@@ -225,7 +462,7 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
                 checkClosed();
                 receiver.setStateInspector(getStateInspector());
                 receiver.open(request);
-                pumpToProtonTransport();
+                pumpToProtonTransport(request);
             }
         });
 
@@ -306,7 +543,7 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
                 checkClosed();
                 receiver.setStateInspector(getStateInspector());
                 receiver.open(request);
-                pumpToProtonTransport();
+                pumpToProtonTransport(request);
             }
         });
 
@@ -343,7 +580,7 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
                 checkClosed();
                 receiver.setStateInspector(getStateInspector());
                 receiver.open(request);
-                pumpToProtonTransport();
+                pumpToProtonTransport(request);
             }
         });
 
@@ -360,10 +597,62 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
     }
 
     public Session getSession() {
-        return new UnmodifiableSession(getEndpoint());
+        return UnmodifiableProxy.sessionProxy(getEndpoint());
     }
 
-    //----- Internal getters used from the child AmqpResource classes --------//
+    public boolean isInTransaction() {
+        return txContext.isInTransaction();
+    }
+
+    @Override
+    public String toString() {
+        return "AmqpSession { " + sessionId + " }";
+    }
+
+    //----- Session Transaction Methods --------------------------------------//
+
+    /**
+     * Starts a new transaction associated with this session.
+     *
+     * @throws Exception if an error occurs starting a new Transaction.
+     */
+    public void begin() throws Exception {
+        if (txContext.isInTransaction()) {
+            throw new javax.jms.IllegalStateException("Session already has an active transaction");
+        }
+
+        txContext.begin();
+    }
+
+    /**
+     * Commit the current transaction associated with this session.
+     *
+     * @throws Exception if an error occurs committing the Transaction.
+     */
+    public void commit() throws Exception {
+        if (!txContext.isInTransaction()) {
+            throw new javax.jms.IllegalStateException(
+                "Commit called on Session that does not have an active transaction");
+        }
+
+        txContext.commit();
+    }
+
+    /**
+     * Roll back the current transaction associated with this session.
+     *
+     * @throws Exception if an error occurs rolling back the Transaction.
+     */
+    public void rollback() throws Exception {
+        if (!txContext.isInTransaction()) {
+            throw new javax.jms.IllegalStateException(
+                "Rollback called on Session that does not have an active transaction");
+        }
+
+        txContext.rollback();
+    }
+
+    //----- Internal access used to manage resources -------------------------//
 
     ScheduledExecutorService getScheduler() {
         return connection.getScheduler();
@@ -373,20 +662,46 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
         return connection.getProtonConnection();
     }
 
-    void pumpToProtonTransport() {
-        connection.pumpToProtonTransport();
+    void pumpToProtonTransport(AsyncResult request) {
+        connection.pumpToProtonTransport(request);
+    }
+
+    public AmqpTransactionId getTransactionId() {
+        if (txContext != null && txContext.isInTransaction()) {
+            return txContext.getTransactionId();
+        }
+
+        return null;
+    }
+
+    AmqpTransactionContext getTransactionContext() {
+        return txContext;
     }
 
     //----- Private implementation details -----------------------------------//
 
     @Override
+    protected void doOpen() {
+        getEndpoint().setIncomingCapacity(Integer.MAX_VALUE);
+        super.doOpen();
+    }
+
+    @Override
     protected void doOpenInspection() {
-        getStateInspector().inspectOpenedResource(getSession());
+        try {
+            getStateInspector().inspectOpenedResource(getSession());
+        } catch (Throwable error) {
+            getStateInspector().markAsInvalid(error.getMessage());
+        }
     }
 
     @Override
     protected void doClosedInspection() {
-        getStateInspector().inspectClosedResource(getSession());
+        try {
+            getStateInspector().inspectClosedResource(getSession());
+        } catch (Throwable error) {
+            getStateInspector().markAsInvalid(error.getMessage());
+        }
     }
 
     private String getNextSenderId() {
@@ -401,10 +716,5 @@ public class AmqpSession extends AmqpAbstractResource<Session> {
         if (isClosed() || connection.isClosed()) {
             throw new IllegalStateException("Session is already closed");
         }
-    }
-
-    @Override
-    public String toString() {
-        return "AmqpSession { " + sessionId + " }";
     }
 }

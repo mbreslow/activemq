@@ -39,6 +39,7 @@ import java.util.TreeMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.Adler32;
 import java.util.zip.Checksum;
 
@@ -134,6 +135,9 @@ public class PageFile {
     // Keeps track of free pages.
     private final AtomicLong nextFreePageId = new AtomicLong();
     private SequenceSet freeList = new SequenceSet();
+
+    private AtomicReference<SequenceSet> recoveredFreeList = new AtomicReference<SequenceSet>();
+    private AtomicReference<SequenceSet> trackingFreeDuringRecovery = new AtomicReference<SequenceSet>();
 
     private final AtomicLong nextTxid = new AtomicLong();
 
@@ -378,7 +382,7 @@ public class PageFile {
 
             File file = getMainPageFile();
             IOHelper.mkdirs(file.getParentFile());
-            writeFile = new RecoverableRandomAccessFile(file, "rw");
+            writeFile = new RecoverableRandomAccessFile(file, "rw", false);
             readFile = new RecoverableRandomAccessFile(file, "r");
 
             if (readFile.length() > 0) {
@@ -409,30 +413,83 @@ public class PageFile {
             } else {
                 LOG.debug(toString() + ", Recovering page file...");
                 nextTxid.set(redoRecoveryUpdates());
-
-                // Scan all to find the free pages.
-                freeList = new SequenceSet();
-                for (Iterator<Page> i = tx().iterator(true); i.hasNext(); ) {
-                    Page page = i.next();
-                    if (page.getType() == Page.PAGE_FREE_TYPE) {
-                        freeList.add(page.getPageId());
-                    }
-                }
+                trackingFreeDuringRecovery.set(new SequenceSet());
             }
-
-            metaData.setCleanShutdown(false);
-            storeMetaData();
-            getFreeFile().delete();
 
             if (writeFile.length() < PAGE_FILE_HEADER_SIZE) {
                 writeFile.setLength(PAGE_FILE_HEADER_SIZE);
             }
             nextFreePageId.set((writeFile.length() - PAGE_FILE_HEADER_SIZE) / pageSize);
-            startWriter();
 
+            metaData.setCleanShutdown(false);
+            storeMetaData();
+            getFreeFile().delete();
+            startWriter();
+            if (trackingFreeDuringRecovery.get() != null) {
+                asyncFreePageRecovery(nextFreePageId.get());
+            }
         } else {
             throw new IllegalStateException("Cannot load the page file when it is already loaded.");
         }
+    }
+
+    private void asyncFreePageRecovery(final long lastRecoveryPage) {
+        Thread thread = new Thread("KahaDB Index Free Page Recovery") {
+            @Override
+            public void run() {
+                try {
+                    recoverFreePages(lastRecoveryPage);
+                } catch (Throwable e) {
+                    if (loaded.get()) {
+                        LOG.warn("Error recovering index free page list", e);
+                    }
+                }
+            }
+        };
+        thread.setPriority(Thread.NORM_PRIORITY);
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    private void recoverFreePages(final long lastRecoveryPage) throws Exception {
+        LOG.info(toString() + ". Recovering pageFile free list due to prior unclean shutdown..");
+        SequenceSet newFreePages = new SequenceSet();
+        // need new pageFile instance to get unshared readFile
+        PageFile recoveryPageFile = new PageFile(directory, name);
+        recoveryPageFile.loadForRecovery(nextFreePageId.get());
+        try {
+            for (Iterator<Page> i = new Transaction(recoveryPageFile).iterator(true); i.hasNext(); ) {
+                Page page = i.next();
+
+                if (page.getPageId() >= lastRecoveryPage) {
+                    break;
+                }
+
+                if (page.getType() == Page.PAGE_FREE_TYPE) {
+                    newFreePages.add(page.getPageId());
+                }
+            }
+        } finally {
+            recoveryPageFile.readFile.close();
+        }
+
+        LOG.info(toString() + ". Recovered pageFile free list of size: " + newFreePages.rangeSize());
+        if (!newFreePages.isEmpty()) {
+
+            // allow flush (with index lock held) to merge eventually
+            recoveredFreeList.lazySet(newFreePages);
+        }
+    }
+
+    private void loadForRecovery(long nextFreePageIdSnap) throws Exception {
+        loaded.set(true);
+        enablePageCaching = false;
+        File file = getMainPageFile();
+        readFile = new RecoverableRandomAccessFile(file, "r");
+        loadMetaData();
+        pageSize = metaData.getPageSize();
+        enableRecoveryFile = false;
+        nextFreePageId.set(nextFreePageIdSnap);
     }
 
 
@@ -460,7 +517,12 @@ public class PageFile {
             }
 
             metaData.setLastTxId(nextTxid.get() - 1);
-            metaData.setCleanShutdown(true);
+            if (trackingFreeDuringRecovery.get() != null) {
+                // async recovery incomplete, will have to try again
+                metaData.setCleanShutdown(false);
+            } else {
+                metaData.setCleanShutdown(true);
+            }
             storeMetaData();
 
             if (readFile != null) {
@@ -489,6 +551,10 @@ public class PageFile {
         return loaded.get();
     }
 
+    public void allowIOResumption() {
+        loaded.set(true);
+    }
+
     /**
      * Flush and sync all write buffers to disk.
      *
@@ -498,6 +564,18 @@ public class PageFile {
 
         if (enabledWriteThread && stopWriter.get()) {
             throw new IOException("Page file already stopped: checkpointing is not allowed");
+        }
+
+        SequenceSet recovered = recoveredFreeList.get();
+        if (recovered != null) {
+            recoveredFreeList.lazySet(null);
+            SequenceSet inUse = trackingFreeDuringRecovery.get();
+            recovered.remove(inUse);
+            freeList.merge(recovered);
+
+            // all set for clean shutdown
+            trackingFreeDuringRecovery.set(null);
+            inUse.clear();
         }
 
         // Setup a latch that gets notified when all buffered writes hits the disk.
@@ -745,6 +823,9 @@ public class PageFile {
         return toOffset(nextFreePageId.get());
     }
 
+    public boolean isFreePage(long pageId) {
+        return freeList.contains(pageId);
+    }
     /**
      * @return the number of pages allocated in the PageFile
      */
@@ -881,6 +962,11 @@ public class PageFile {
     public void freePage(long pageId) {
         freeList.add(pageId);
         removeFromCache(pageId);
+
+        SequenceSet trackFreeDuringRecovery = trackingFreeDuringRecovery.get();
+        if (trackFreeDuringRecovery != null) {
+            trackFreeDuringRecovery.add(pageId);
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -1048,28 +1134,24 @@ public class PageFile {
             this.checkpointLatch = null;
         }
 
-        Checksum checksum = new Adler32();
-        if (enableRecoveryFile) {
-            recoveryFile.seek(RECOVERY_FILE_HEADER_SIZE);
-        }
-        for (PageWrite w : batch) {
-            if (enableRecoveryFile) {
-                try {
-                    checksum.update(w.getDiskBound(), 0, pageSize);
-                } catch (Throwable t) {
-                    throw IOExceptionSupport.create("Cannot create recovery file. Reason: " + t, t);
-                }
-                recoveryFile.writeLong(w.page.getPageId());
-                recoveryFile.write(w.getDiskBound(), 0, pageSize);
-            }
-
-            writeFile.seek(toOffset(w.page.getPageId()));
-            writeFile.write(w.getDiskBound(), 0, pageSize);
-            w.done();
-        }
-
         try {
+
+            // First land the writes in the recovery file
             if (enableRecoveryFile) {
+                Checksum checksum = new Adler32();
+
+                recoveryFile.seek(RECOVERY_FILE_HEADER_SIZE);
+
+                for (PageWrite w : batch) {
+                    try {
+                        checksum.update(w.getDiskBound(), 0, pageSize);
+                    } catch (Throwable t) {
+                        throw IOExceptionSupport.create("Cannot create recovery file. Reason: " + t, t);
+                    }
+                    recoveryFile.writeLong(w.page.getPageId());
+                    recoveryFile.write(w.getDiskBound(), 0, pageSize);
+                }
+
                 // Can we shrink the recovery buffer??
                 if (recoveryPageCount > recoveryFileMaxPageCount) {
                     int t = Math.max(recoveryFileMinPageCount, batch.size());
@@ -1086,15 +1168,28 @@ public class PageFile {
                 recoveryFile.writeLong(checksum.getValue());
                 // Write the # of pages that will follow
                 recoveryFile.writeInt(batch.size());
+
+                if (enableDiskSyncs) {
+                    recoveryFile.sync();
+                }
+            }
+
+            for (PageWrite w : batch) {
+                writeFile.seek(toOffset(w.page.getPageId()));
+                writeFile.write(w.getDiskBound(), 0, pageSize);
+                w.done();
             }
 
             if (enableDiskSyncs) {
-                // Sync to make sure recovery buffer writes land on disk..
-                if (enableRecoveryFile) {
-                    recoveryFile.sync();
-                }
                 writeFile.sync();
             }
+
+        } catch (IOException ioError) {
+            LOG.info("Unexpected io error on pagefile write of " + batch.size() + " pages.", ioError);
+            // any subsequent write needs to be prefaced with a considered call to redoRecoveryUpdates
+            // to ensure disk image is self consistent
+            loaded.set(false);
+            throw  ioError;
         } finally {
             synchronized (writes) {
                 for (PageWrite w : batch) {

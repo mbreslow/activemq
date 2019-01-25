@@ -16,12 +16,13 @@
  */
 package org.apache.activemq.openwire;
 
+import org.apache.activemq.ActiveMQConnectionMetaData;
 import org.apache.activemq.command.WireFormatInfo;
 import org.apache.activemq.wireformat.WireFormat;
 import org.apache.activemq.wireformat.WireFormatFactory;
 
 /**
- * 
+ *
  */
 public class OpenWireFormatFactory implements WireFormatFactory {
 
@@ -41,7 +42,12 @@ public class OpenWireFormatFactory implements WireFormatFactory {
     private int cacheSize = 1024;
     private long maxFrameSize = OpenWireFormat.DEFAULT_MAX_FRAME_SIZE;
     private String host=null;
+    private String providerName = ActiveMQConnectionMetaData.PROVIDER_NAME;
+    private String providerVersion = ActiveMQConnectionMetaData.PROVIDER_VERSION;
+    private String platformDetails = ActiveMQConnectionMetaData.DEFAULT_PLATFORM_DETAILS;
+    private boolean includePlatformDetails = false;
 
+    @Override
     public WireFormat createWireFormat() {
         WireFormatInfo info = new WireFormatInfo();
         info.setVersion(version);
@@ -59,6 +65,12 @@ public class OpenWireFormatFactory implements WireFormatFactory {
             if( host!=null ) {
                 info.setHost(host);
             }
+            info.setProviderName(providerName);
+            info.setProviderVersion(providerVersion);
+            if (includePlatformDetails) {
+                platformDetails = ActiveMQConnectionMetaData.PLATFORM_DETAILS;
+            }
+            info.setPlatformDetails(platformDetails);
         } catch (Exception e) {
             IllegalStateException ise = new IllegalStateException("Could not configure WireFormatInfo");
             ise.initCause(e);
@@ -158,5 +170,37 @@ public class OpenWireFormatFactory implements WireFormatFactory {
 
     public void setHost(String host) {
         this.host = host;
+    }
+
+    public String getProviderName() {
+        return providerName;
+    }
+
+    public void setProviderName(String providerName) {
+        this.providerName = providerName;
+    }
+
+    public String getProviderVersion() {
+        return providerVersion;
+    }
+
+    public void setProviderVersion(String providerVersion) {
+        this.providerVersion = providerVersion;
+    }
+
+    public String getPlatformDetails() {
+        return platformDetails;
+    }
+
+    public void setPlatformDetails(String platformDetails) {
+        this.platformDetails = platformDetails;
+    }
+
+    public boolean isIncludePlatformDetails() {
+        return includePlatformDetails;
+    }
+
+    public void setIncludePlatformDetails(boolean includePlatformDetails) {
+        this.includePlatformDetails = includePlatformDetails;
     }
 }

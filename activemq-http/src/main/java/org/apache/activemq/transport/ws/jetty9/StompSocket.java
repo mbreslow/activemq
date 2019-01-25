@@ -17,10 +17,12 @@
 package org.apache.activemq.transport.ws.jetty9;
 
 import java.io.IOException;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.activemq.transport.stomp.Stomp;
 import org.apache.activemq.transport.stomp.StompFrame;
 import org.apache.activemq.transport.ws.AbstractStompSocket;
+import org.apache.activemq.util.IOExceptionSupport;
 import org.eclipse.jetty.websocket.api.Session;
 import org.eclipse.jetty.websocket.api.WebSocketListener;
 import org.slf4j.Logger;
@@ -33,6 +35,8 @@ public class StompSocket extends AbstractStompSocket implements WebSocketListene
 
     private static final Logger LOG = LoggerFactory.getLogger(StompSocket.class);
 
+    private final int ORDERLY_CLOSE_TIMEOUT = 10;
+
     private Session session;
 
     public StompSocket(String remoteAddress) {
@@ -41,7 +45,12 @@ public class StompSocket extends AbstractStompSocket implements WebSocketListene
 
     @Override
     public void sendToStomp(StompFrame command) throws IOException {
-        session.getRemote().sendString(command.format());
+        try {
+            //timeout after a period of time so we don't wait forever and hold the protocol lock
+            session.getRemote().sendStringByFuture(getWireFormat().marshalToString(command)).get(getDefaultSendTimeOut(), TimeUnit.SECONDS);
+        } catch (Exception e) {
+            throw IOExceptionSupport.create(e);
+        }
     }
 
     @Override
@@ -60,9 +69,16 @@ public class StompSocket extends AbstractStompSocket implements WebSocketListene
     @Override
     public void onWebSocketClose(int arg0, String arg1) {
         try {
-            protocolConverter.onStompCommand(new StompFrame(Stomp.Commands.DISCONNECT));
+            if (protocolLock.tryLock() || protocolLock.tryLock(ORDERLY_CLOSE_TIMEOUT, TimeUnit.SECONDS)) {
+                LOG.debug("Stomp WebSocket closed: code[{}] message[{}]", arg0, arg1);
+                protocolConverter.onStompCommand(new StompFrame(Stomp.Commands.DISCONNECT));
+            }
         } catch (Exception e) {
-            LOG.warn("Failed to close WebSocket", e);
+            LOG.debug("Failed to close STOMP WebSocket cleanly", e);
+        } finally {
+            if (protocolLock.isHeldByCurrentThread()) {
+                protocolLock.unlock();
+            }
         }
     }
 
@@ -78,5 +94,9 @@ public class StompSocket extends AbstractStompSocket implements WebSocketListene
     @Override
     public void onWebSocketText(String data) {
         processStompFrame(data);
+    }
+
+    private static int getDefaultSendTimeOut() {
+        return Integer.getInteger("org.apache.activemq.transport.ws.StompSocket.sendTimeout", 30);
     }
 }

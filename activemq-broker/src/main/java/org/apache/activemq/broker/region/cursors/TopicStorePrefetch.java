@@ -69,7 +69,7 @@ class TopicStorePrefetch extends AbstractStoreCursor {
     public synchronized void addMessageFirst(MessageReference node) throws Exception {
         batchList.addMessageFirst(node);
         size++;
-        //this.messageSize.addSize(node.getMessage().getSize());
+        node.incrementReferenceCount();
     }
 
     @Override
@@ -92,6 +92,14 @@ class TopicStorePrefetch extends AbstractStoreCursor {
             storeHasMessages = true;
         }
         return recovered;
+    }
+
+    @Override
+    protected boolean duplicateFromStoreExcepted(Message message) {
+        // setBatch is not implemented - sequence order not reliable with concurrent transactions
+        // on cache exhaustion - first pageIn starts from last ack location which may replay what
+        // cursor has dispatched
+        return true;
     }
 
     @Override
@@ -137,6 +145,7 @@ class TopicStorePrefetch extends AbstractStoreCursor {
         this.storeHasMessages = false;
         this.store.recoverNextMessages(clientId, subscriberName,
                 maxBatchSize, this);
+        dealWithDuplicates();
         if (!this.storeHasMessages && (!this.batchList.isEmpty() || !hadSpace)) {
             this.storeHasMessages = true;
         }

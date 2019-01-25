@@ -130,8 +130,8 @@ public class ActiveMQMapMessage extends ActiveMQMessage implements MapMessage {
     }
 
     @Override
-    public void clearMarshalledState() throws JMSException {
-        super.clearMarshalledState();
+    public void clearUnMarshalledState() throws JMSException {
+        super.clearUnMarshalledState();
         map.clear();
     }
 
@@ -160,6 +160,11 @@ public class ActiveMQMapMessage extends ActiveMQMessage implements MapMessage {
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    @Override
+    public boolean isContentMarshalled() {
+        return content != null || map == null || map.isEmpty();
     }
 
     /**

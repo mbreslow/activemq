@@ -43,6 +43,7 @@ import org.apache.activemq.blob.BlobDownloader;
 import org.apache.activemq.command.ActiveMQBlobMessage;
 import org.apache.activemq.command.ActiveMQDestination;
 import org.apache.activemq.command.ActiveMQMessage;
+import org.apache.activemq.command.ActiveMQObjectMessage;
 import org.apache.activemq.command.ActiveMQTempDestination;
 import org.apache.activemq.command.CommandTypes;
 import org.apache.activemq.command.ConsumerId;
@@ -211,6 +212,9 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
 
         this.session = session;
         this.redeliveryPolicy = session.connection.getRedeliveryPolicyMap().getEntryFor(dest);
+        if (this.redeliveryPolicy == null) {
+            this.redeliveryPolicy = new RedeliveryPolicy();
+        }
         setTransformer(session.getTransformer());
 
         this.info = new ConsumerInfo(consumerId);
@@ -502,7 +506,7 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
                     sendPullCommand(timeout);
                 } else if (redeliveryExceeded(md)) {
                     LOG.debug("{} received with excessive redelivered: {}", getConsumerId(), md);
-                    posionAck(md, "dispatch to " + getConsumerId() + " exceeds redelivery policy limit:" + redeliveryPolicy);
+                    posionAck(md, "Dispatch[" + md.getRedeliveryCounter() + "] to " + getConsumerId() + " exceeds redelivery policy limit:" + redeliveryPolicy);
                     if (timeout > 0) {
                         timeout = Math.max(deadline - System.currentTimeMillis(), 0);
                     }
@@ -521,11 +525,7 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
     }
 
     private boolean consumeExpiredMessage(MessageDispatch dispatch) {
-        if (dispatch.getMessage().isExpired()) {
-            return !isBrowser() && isConsumerExpiryCheckEnabled();
-        }
-
-        return false;
+        return isConsumerExpiryCheckEnabled() && dispatch.getMessage().isExpired();
     }
 
     private void posionAck(MessageDispatch md, String cause) throws JMSException {
@@ -539,6 +539,7 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
         try {
             return session.getTransacted()
                     && redeliveryPolicy != null
+                    && redeliveryPolicy.isPreDispatchCheck()
                     && redeliveryPolicy.getMaximumRedeliveries() != RedeliveryPolicy.NO_MAXIMUM_REDELIVERIES
                     && md.getRedeliveryCounter() > redeliveryPolicy.getMaximumRedeliveries()
                     // redeliveryCounter > x expected after resend via brokerRedeliveryPlugin
@@ -588,6 +589,10 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
         if (m.getDataStructureType()==CommandTypes.ACTIVEMQ_BLOB_MESSAGE) {
             ((ActiveMQBlobMessage)m).setBlobDownloader(new BlobDownloader(session.getBlobTransferPolicy()));
         }
+        if (m.getDataStructureType() == CommandTypes.ACTIVEMQ_OBJECT_MESSAGE) {
+            ((ActiveMQObjectMessage)m).setTrustAllPackages(session.getConnection().isTrustAllPackages());
+            ((ActiveMQObjectMessage)m).setTrustedPackages(session.getConnection().getTrustedPackages());
+        }
         if (transformer != null) {
             Message transformedMessage = transformer.consumerTransform(session, this, m);
             if (transformedMessage != null) {
@@ -598,6 +603,7 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
             m.setAcknowledgeCallback(new Callback() {
                 @Override
                 public void execute() throws Exception {
+                    checkClosed();
                     session.checkClosed();
                     session.acknowledge();
                 }
@@ -606,6 +612,7 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
             m.setAcknowledgeCallback(new Callback() {
                 @Override
                 public void execute() throws Exception {
+                    checkClosed();
                     session.checkClosed();
                     acknowledge(md);
                 }
@@ -726,17 +733,11 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
     }
 
     void doClose() throws JMSException {
-        // Store interrupted state and clear so that Transport operations don't
-        // throw InterruptedException and we ensure that resources are cleaned up.
-        boolean interrupted = Thread.interrupted();
         dispose();
         RemoveInfo removeCommand = info.createRemoveCommand();
         LOG.debug("remove: {}, lastDeliveredSequenceId: {}", getConsumerId(), lastDeliveredSequenceId);
         removeCommand.setLastDeliveredSequenceId(lastDeliveredSequenceId);
         this.session.asyncSendPacket(removeCommand);
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
     }
 
     void inProgressClearRequired() {
@@ -778,8 +779,8 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
     void deliverAcks() {
         MessageAck ack = null;
         if (deliveryingAcknowledgements.compareAndSet(false, true)) {
-            if (isAutoAcknowledgeEach()) {
-                synchronized(deliveredMessages) {
+            synchronized(deliveredMessages) {
+                if (isAutoAcknowledgeEach()) {
                     ack = makeAckForAllDeliveredMessages(MessageAck.STANDARD_ACK_TYPE);
                     if (ack != null) {
                         deliveredMessages.clear();
@@ -788,10 +789,10 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
                         ack = pendingAck;
                         pendingAck = null;
                     }
+                } else if (pendingAck != null && pendingAck.isStandardAck()) {
+                    ack = pendingAck;
+                    pendingAck = null;
                 }
-            } else if (pendingAck != null && pendingAck.isStandardAck()) {
-                ack = pendingAck;
-                pendingAck = null;
             }
             if (ack != null) {
                 final MessageAck ackToSend = ack;
@@ -861,7 +862,9 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
             if (!this.info.isBrowser()) {
                 for (MessageDispatch old : list) {
                     // ensure we don't filter this as a duplicate
-                    LOG.debug("on close, rollback duplicate: {}", old.getMessage().getMessageId());
+                    if (old.getMessage() != null) {
+                        LOG.debug("on close, rollback duplicate: {}", old.getMessage().getMessageId());
+                    }
                     session.connection.rollbackDuplicate(this, old.getMessage());
                 }
             }
@@ -930,7 +933,7 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
         registerSync();
         MessageAck ack = new MessageAck(md, MessageAck.INDIVIDUAL_ACK_TYPE, 1);
         ack.setTransactionId(session.getTransactionContext().getTransactionId());
-        session.syncSendPacket(ack);
+        session.sendAck(ack);
     }
 
     private void afterMessageIsConsumed(MessageDispatch md, boolean messageExpired) throws JMSException {
@@ -1031,31 +1034,33 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
 
         deliveredCounter++;
 
-        MessageAck oldPendingAck = pendingAck;
-        pendingAck = new MessageAck(md, ackType, deliveredCounter);
-        pendingAck.setTransactionId(session.getTransactionContext().getTransactionId());
-        if( oldPendingAck==null ) {
-            pendingAck.setFirstMessageId(pendingAck.getLastMessageId());
-        } else if ( oldPendingAck.getAckType() == pendingAck.getAckType() ) {
-            pendingAck.setFirstMessageId(oldPendingAck.getFirstMessageId());
-        } else {
-            // old pending ack being superseded by ack of another type, if is is not a delivered
-            // ack and hence important, send it now so it is not lost.
-            if (!oldPendingAck.isDeliveredAck()) {
-                LOG.debug("Sending old pending ack {}, new pending: {}", oldPendingAck, pendingAck);
-                session.sendAck(oldPendingAck);
+        synchronized(deliveredMessages) {
+            MessageAck oldPendingAck = pendingAck;
+            pendingAck = new MessageAck(md, ackType, deliveredCounter);
+            pendingAck.setTransactionId(session.getTransactionContext().getTransactionId());
+            if( oldPendingAck==null ) {
+                pendingAck.setFirstMessageId(pendingAck.getLastMessageId());
+            } else if ( oldPendingAck.getAckType() == pendingAck.getAckType() ) {
+                pendingAck.setFirstMessageId(oldPendingAck.getFirstMessageId());
             } else {
-                LOG.debug("dropping old pending ack {}, new pending: {}", oldPendingAck, pendingAck);
+                // old pending ack being superseded by ack of another type, if is is not a delivered
+                // ack and hence important, send it now so it is not lost.
+                if (!oldPendingAck.isDeliveredAck()) {
+                    LOG.debug("Sending old pending ack {}, new pending: {}", oldPendingAck, pendingAck);
+                    session.sendAck(oldPendingAck);
+                } else {
+                    LOG.debug("dropping old pending ack {}, new pending: {}", oldPendingAck, pendingAck);
+                }
             }
-        }
-        // AMQ-3956 evaluate both expired and normal msgs as
-        // otherwise consumer may get stalled
-        if ((0.5 * info.getPrefetchSize()) <= (deliveredCounter + ackCounter - additionalWindowSize)) {
-            LOG.debug("ackLater: sending: {}", pendingAck);
-            session.sendAck(pendingAck);
-            pendingAck=null;
-            deliveredCounter = 0;
-            additionalWindowSize = 0;
+            // AMQ-3956 evaluate both expired and normal msgs as
+            // otherwise consumer may get stalled
+            if ((0.5 * info.getPrefetchSize()) <= (deliveredCounter + ackCounter - additionalWindowSize)) {
+                LOG.debug("ackLater: sending: {}", pendingAck);
+                session.sendAck(pendingAck);
+                pendingAck=null;
+                deliveredCounter = 0;
+                additionalWindowSize = 0;
+            }
         }
     }
 
@@ -1152,7 +1157,7 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
                         break;
                     }
                 }
-            } while (numberNotReplayed > 0 && expiry < System.currentTimeMillis());
+            } while (numberNotReplayed > 0 && expiry - System.currentTimeMillis() < 0);
         }
     }
 
@@ -1251,7 +1256,7 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
 
                     MessageAck ack = new MessageAck(lastMd, MessageAck.POSION_ACK_TYPE, deliveredMessages.size());
                     ack.setFirstMessageId(firstMsgId);
-                    ack.setPoisonCause(new Throwable("Exceeded redelivery policy limit:" + redeliveryPolicy
+                    ack.setPoisonCause(new Throwable("Delivery[" + lastMd.getMessage().getRedeliveryCounter()  + "] exceeds redelivery policy limit:" + redeliveryPolicy
                             + ", cause:" + lastMd.getRollbackCause(), lastMd.getRollbackCause()));
                     session.sendAck(ack,true);
                     // Adjust the window size.
@@ -1388,7 +1393,7 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
                     if (this.info.isBrowser() || !session.connection.isDuplicate(this, md.getMessage())) {
                         if (listener != null && unconsumedMessages.isRunning()) {
                             if (redeliveryExceeded(md)) {
-                                posionAck(md, "dispatch to " + getConsumerId() + " exceeds redelivery policy limit:" + redeliveryPolicy);
+                                posionAck(md, "listener dispatch[" + md.getRedeliveryCounter() + "] to " + getConsumerId() + " exceeds redelivery policy limit:" + redeliveryPolicy);
                                 return;
                             }
                             ActiveMQMessage message = createActiveMQMessage(md);
@@ -1401,13 +1406,12 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
                                 afterMessageIsConsumed(md, expired);
                             } catch (RuntimeException e) {
                                 LOG.error("{} Exception while processing message: {}", getConsumerId(), md.getMessage().getMessageId(), e);
+                                md.setRollbackCause(e);
                                 if (isAutoAcknowledgeBatch() || isAutoAcknowledgeEach() || session.isIndividualAcknowledge()) {
                                     // schedual redelivery and possible dlq processing
-                                    md.setRollbackCause(e);
                                     rollback();
                                 } else {
-                                    // Transacted or Client ack: Deliver the
-                                    // next message.
+                                    // Transacted or Client ack: Deliver the next message.
                                     afterMessageIsConsumed(md, false);
                                 }
                             }
@@ -1416,9 +1420,26 @@ public class ActiveMQMessageConsumer implements MessageAvailableConsumer, StatsC
                                 // delayed redelivery, ensure it can be re delivered
                                 session.connection.rollbackDuplicate(this, md.getMessage());
                             }
-                            unconsumedMessages.enqueue(md);
-                            if (availableListener != null) {
-                                availableListener.onMessageAvailable(this);
+
+                            if (md.getMessage() == null) {
+                                // End of browse or pull request timeout.
+                                unconsumedMessages.enqueue(md);
+                            } else {
+                                if (!consumeExpiredMessage(md)) {
+                                    unconsumedMessages.enqueue(md);
+                                    if (availableListener != null) {
+                                        availableListener.onMessageAvailable(this);
+                                    }
+                                } else {
+                                    beforeMessageIsConsumed(md);
+                                    afterMessageIsConsumed(md, true);
+
+                                    // Pull consumer needs to check if pull timed out and send
+                                    // a new pull command if not.
+                                    if (info.getCurrentPrefetchSize() == 0) {
+                                        unconsumedMessages.enqueue(null);
+                                    }
+                                }
                             }
                         }
                     } else {

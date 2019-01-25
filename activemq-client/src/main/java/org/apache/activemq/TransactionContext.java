@@ -16,7 +16,6 @@
  */
 package org.apache.activemq;
 
-import java.io.InterruptedIOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -29,13 +28,11 @@ import javax.transaction.xa.XAException;
 import javax.transaction.xa.XAResource;
 import javax.transaction.xa.Xid;
 
-import org.apache.activemq.command.Command;
 import org.apache.activemq.command.ConnectionId;
 import org.apache.activemq.command.DataArrayResponse;
 import org.apache.activemq.command.DataStructure;
 import org.apache.activemq.command.IntegerResponse;
 import org.apache.activemq.command.LocalTransactionId;
-import org.apache.activemq.command.Response;
 import org.apache.activemq.command.TransactionId;
 import org.apache.activemq.command.TransactionInfo;
 import org.apache.activemq.command.XATransactionId;
@@ -280,7 +277,7 @@ public class TransactionContext implements XAResource {
             TransactionInfo info = new TransactionInfo(getConnectionId(), transactionId, TransactionInfo.ROLLBACK);
             this.transactionId = null;
             //make this synchronous - see https://issues.apache.org/activemq/browse/AMQ-2364
-            this.connection.syncSendPacket(info);
+            this.connection.syncSendPacket(info, this.connection.isClosing() ? this.connection.getCloseTimeout() : 0);
             // Notify the listener that the tx was rolled back
             if (localTransactionEventListener != null) {
                 localTransactionEventListener.rollbackEvent();
@@ -330,7 +327,7 @@ public class TransactionContext implements XAResource {
             this.transactionId = null;
             // Notify the listener that the tx was committed back
             try {
-                syncSendPacketWithInterruptionHandling(info);
+                this.connection.syncSendPacket(info);
                 if (localTransactionEventListener != null) {
                     localTransactionEventListener.commitEvent();
                 }
@@ -403,29 +400,33 @@ public class TransactionContext implements XAResource {
             if (!equals(associatedXid, xid)) {
                 throw new XAException(XAException.XAER_PROTO);
             }
-
-            // TODO: we may want to put the xid in a suspended list.
-            try {
-                beforeEnd();
-            } catch (JMSException e) {
-                throw toXAException(e);
-            } finally {
-                setXid(null);
-            }
+            invokeBeforeEnd();
         } else if ((flags & TMSUCCESS) == TMSUCCESS) {
             // set to null if this is the current xid.
             // otherwise this could be an asynchronous success call
             if (equals(associatedXid, xid)) {
-                try {
-                    beforeEnd();
-                } catch (JMSException e) {
-                    throw toXAException(e);
-                } finally {
-                    setXid(null);
-                }
+                invokeBeforeEnd();
             }
         } else {
             throw new XAException(XAException.XAER_INVAL);
+        }
+    }
+
+    private void invokeBeforeEnd() throws XAException {
+        boolean throwingException = false;
+        try {
+            beforeEnd();
+        } catch (JMSException e) {
+            throwingException = true;
+            throw toXAException(e);
+        } finally {
+            try {
+                setXid(null);
+            } catch (XAException ignoreIfWillMask){
+                if (!throwingException) {
+                    throw ignoreIfWillMask;
+                }
+            }
         }
     }
 
@@ -465,7 +466,7 @@ public class TransactionContext implements XAResource {
             TransactionInfo info = new TransactionInfo(getConnectionId(), x, TransactionInfo.PREPARE);
 
             // Find out if the server wants to commit or rollback.
-            IntegerResponse response = (IntegerResponse)syncSendPacketWithInterruptionHandling(info);
+            IntegerResponse response = (IntegerResponse)this.connection.syncSendPacket(info);
             if (XAResource.XA_RDONLY == response.getResult()) {
                 // transaction stops now, may be syncs that need a callback
                 List<TransactionContext> l;
@@ -534,7 +535,7 @@ public class TransactionContext implements XAResource {
 
             // Let the server know that the tx is rollback.
             TransactionInfo info = new TransactionInfo(getConnectionId(), x, TransactionInfo.ROLLBACK);
-            syncSendPacketWithInterruptionHandling(info);
+            this.connection.syncSendPacket(info);
 
             List<TransactionContext> l;
             synchronized(ENDED_XA_TRANSACTION_CONTEXTS) {
@@ -581,7 +582,7 @@ public class TransactionContext implements XAResource {
             // Notify the server that the tx was committed back
             TransactionInfo info = new TransactionInfo(getConnectionId(), x, onePhase ? TransactionInfo.COMMIT_ONE_PHASE : TransactionInfo.COMMIT_TWO_PHASE);
 
-            syncSendPacketWithInterruptionHandling(info);
+            this.connection.syncSendPacket(info);
 
             List<TransactionContext> l;
             synchronized(ENDED_XA_TRANSACTION_CONTEXTS) {
@@ -643,7 +644,7 @@ public class TransactionContext implements XAResource {
 
         try {
             // Tell the server to forget the transaction.
-            syncSendPacketWithInterruptionHandling(info);
+            this.connection.syncSendPacket(info);
         } catch (JMSException e) {
             throw toXAException(e);
         }
@@ -671,26 +672,32 @@ public class TransactionContext implements XAResource {
     @Override
     public Xid[] recover(int flag) throws XAException {
         LOG.debug("recover({})", flag);
+        XATransactionId[] answer;
 
-        TransactionInfo info = new TransactionInfo(getConnectionId(), null, TransactionInfo.RECOVER);
-        try {
-            this.connection.checkClosedOrFailed();
-            this.connection.ensureConnectionInfoSent();
+        if (XAResource.TMNOFLAGS == flag) {
+            // signal next in cursor scan, which for us is always the end b/c we don't maintain any cursor state
+            // allows looping scan to complete
+            answer = new XATransactionId[0];
+        } else {
+            TransactionInfo info = new TransactionInfo(getConnectionId(), null, TransactionInfo.RECOVER);
+            try {
+                this.connection.checkClosedOrFailed();
+                this.connection.ensureConnectionInfoSent();
 
-            DataArrayResponse receipt = (DataArrayResponse)this.connection.syncSendPacket(info);
-            DataStructure[] data = receipt.getData();
-            XATransactionId[] answer;
-            if (data instanceof XATransactionId[]) {
-                answer = (XATransactionId[])data;
-            } else {
-                answer = new XATransactionId[data.length];
-                System.arraycopy(data, 0, answer, 0, data.length);
+                DataArrayResponse receipt = (DataArrayResponse) this.connection.syncSendPacket(info);
+                DataStructure[] data = receipt.getData();
+                if (data instanceof XATransactionId[]) {
+                    answer = (XATransactionId[]) data;
+                } else {
+                    answer = new XATransactionId[data.length];
+                    System.arraycopy(data, 0, answer, 0, data.length);
+                }
+            } catch (JMSException e) {
+                throw toXAException(e);
             }
-            LOG.debug("recover({})={}", flag, answer);
-            return answer;
-        } catch (JMSException e) {
-            throw toXAException(e);
         }
+        LOG.debug("recover({})={}", flag, answer);
+        return answer;
     }
 
     @Override
@@ -741,7 +748,7 @@ public class TransactionContext implements XAResource {
             if (transactionId != null) {
                 TransactionInfo info = new TransactionInfo(getConnectionId(), transactionId, TransactionInfo.END);
                 try {
-                    syncSendPacketWithInterruptionHandling(info);
+                    this.connection.syncSendPacket(info);
                     LOG.debug("{} ended XA transaction {}", this, transactionId);
                 } catch (JMSException e) {
                     disassociate();
@@ -771,31 +778,6 @@ public class TransactionContext implements XAResource {
          // dis-associate
          associatedXid = null;
          transactionId = null;
-    }
-
-    /**
-     * Sends the given command. Also sends the command in case of interruption,
-     * so that important commands like rollback and commit are never interrupted.
-     * If interruption occurred, set the interruption state of the current
-     * after performing the action again.
-     *
-     * @return the response
-     */
-    private Response syncSendPacketWithInterruptionHandling(Command command) throws JMSException {
-        try {
-            return this.connection.syncSendPacket(command);
-        } catch (JMSException e) {
-            if (e.getLinkedException() instanceof InterruptedIOException) {
-                try {
-                    Thread.interrupted();
-                    return this.connection.syncSendPacket(command);
-                } finally {
-                    Thread.currentThread().interrupt();
-                }
-            }
-
-            throw e;
-        }
     }
 
     /**

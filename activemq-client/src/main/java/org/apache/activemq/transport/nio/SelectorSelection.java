@@ -44,7 +44,7 @@ public final class SelectorSelection {
                 try {
                     SelectorSelection.this.key = selectable.register(worker.selector, 0, SelectorSelection.this);
                 } catch (Exception e) {
-                    e.printStackTrace();
+                    onError(e);
                 }
             }
         });
@@ -86,8 +86,9 @@ public final class SelectorSelection {
                     try {
                         key.cancel();
                     } catch (CancelledKeyException e) {
+                    } finally {
+                        worker.release();
                     }
-                    worker.release();
                 }
             });
         }

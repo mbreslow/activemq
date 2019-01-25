@@ -19,20 +19,25 @@ package org.apache.activemq.store.kahadb;
 import java.io.File;
 import java.io.IOException;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.activemq.broker.Broker;
 import org.apache.activemq.broker.ConnectionContext;
+import org.apache.activemq.broker.region.BaseDestination;
 import org.apache.activemq.command.Message;
 import org.apache.activemq.command.MessageAck;
 import org.apache.activemq.command.MessageId;
 import org.apache.activemq.command.TransactionId;
 import org.apache.activemq.command.XATransactionId;
 import org.apache.activemq.store.AbstractMessageStore;
+import org.apache.activemq.store.IndexListener;
 import org.apache.activemq.store.ListenableFuture;
 import org.apache.activemq.store.MessageStore;
 import org.apache.activemq.store.PersistenceAdapter;
@@ -47,6 +52,7 @@ import org.apache.activemq.store.kahadb.data.KahaPrepareCommand;
 import org.apache.activemq.store.kahadb.data.KahaTraceCommand;
 import org.apache.activemq.store.kahadb.disk.journal.Journal;
 import org.apache.activemq.store.kahadb.disk.journal.Location;
+import org.apache.activemq.usage.StoreUsage;
 import org.apache.activemq.util.DataByteArrayInputStream;
 import org.apache.activemq.util.DataByteArrayOutputStream;
 import org.apache.activemq.util.IOHelper;
@@ -61,6 +67,7 @@ public class MultiKahaDBTransactionStore implements TransactionStore {
     private Journal journal;
     private int journalMaxFileLength = Journal.DEFAULT_MAX_FILE_LENGTH;
     private int journalWriteBatchSize = Journal.DEFAULT_MAX_WRITE_BATCH_SIZE;
+    private final AtomicBoolean started = new AtomicBoolean(false);
 
     public MultiKahaDBTransactionStore(MultiKahaDBPersistenceAdapter multiKahaDBPersistenceAdapter) {
         this.multiKahaDBPersistenceAdapter = multiKahaDBPersistenceAdapter;
@@ -96,6 +103,28 @@ public class MultiKahaDBTransactionStore implements TransactionStore {
             @Override
             public void removeAsyncMessage(ConnectionContext context, MessageAck ack) throws IOException {
                 MultiKahaDBTransactionStore.this.removeAsyncMessage(transactionStore, context, getDelegate(), ack);
+            }
+
+            @Override
+            public void registerIndexListener(IndexListener indexListener) {
+                getDelegate().registerIndexListener(indexListener);
+                try {
+                    if (indexListener instanceof BaseDestination) {
+                        // update queue storeUsage
+                        Object matchingPersistenceAdapter = multiKahaDBPersistenceAdapter.destinationMap.chooseValue(getDelegate().getDestination());
+                        if (matchingPersistenceAdapter instanceof FilteredKahaDBPersistenceAdapter) {
+                            FilteredKahaDBPersistenceAdapter filteredAdapter = (FilteredKahaDBPersistenceAdapter) matchingPersistenceAdapter;
+                            if (filteredAdapter.getUsage() != null && filteredAdapter.getPersistenceAdapter() instanceof KahaDBPersistenceAdapter) {
+                                StoreUsage storeUsage = filteredAdapter.getUsage();
+                                storeUsage.setStore(filteredAdapter.getPersistenceAdapter());
+                                storeUsage.setParent(multiKahaDBPersistenceAdapter.getBrokerService().getSystemUsage().getStoreUsage());
+                                ((BaseDestination) indexListener).getSystemUsage().setStoreUsage(storeUsage);
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {
+                    LOG.warn("Failed to set mKahaDB destination store usage", ignored);
+                }
             }
         };
     }
@@ -162,15 +191,23 @@ public class MultiKahaDBTransactionStore implements TransactionStore {
     }
 
     public class Tx {
-        private final Set<TransactionStore> stores = new HashSet<TransactionStore>();
+        private final HashMap<TransactionStore, TransactionId> stores = new HashMap<TransactionStore, TransactionId>();
         private int prepareLocationId = 0;
 
+        public void trackStore(TransactionStore store, XATransactionId xid) {
+            stores.put(store, xid);
+        }
+
         public void trackStore(TransactionStore store) {
-            stores.add(store);
+            stores.put(store, null);
+        }
+
+        public HashMap<TransactionStore, TransactionId> getStoresMap() {
+            return stores;
         }
 
         public Set<TransactionStore> getStores() {
-            return stores;
+            return stores.keySet();
         }
 
         public void trackPrepareLocation(Location location) {
@@ -213,8 +250,13 @@ public class MultiKahaDBTransactionStore implements TransactionStore {
 
         Tx tx = getTx(txid);
         if (wasPrepared) {
-            for (TransactionStore store : tx.getStores()) {
-                store.commit(txid, true, null, null);
+            for (Map.Entry<TransactionStore, TransactionId> storeTx : tx.getStoresMap().entrySet()) {
+                TransactionId recovered = storeTx.getValue();
+                if (recovered != null) {
+                    storeTx.getKey().commit(recovered, true, null, null);
+                } else {
+                    storeTx.getKey().commit(txid, true, null, null);
+                }
             }
         } else {
             // can only do 1pc on a single store
@@ -262,28 +304,35 @@ public class MultiKahaDBTransactionStore implements TransactionStore {
     public void rollback(TransactionId txid) throws IOException {
         Tx tx = removeTx(txid);
         if (tx != null) {
-            for (TransactionStore store : tx.getStores()) {
-                store.rollback(txid);
+            for (Map.Entry<TransactionStore, TransactionId> storeTx : tx.getStoresMap().entrySet()) {
+                TransactionId recovered = storeTx.getValue();
+                if (recovered != null) {
+                    storeTx.getKey().rollback(recovered);
+                } else {
+                    storeTx.getKey().rollback(txid);
+                }
             }
         }
     }
 
     @Override
     public void start() throws Exception {
-        journal = new Journal() {
-            @Override
-            protected void cleanup() {
-                super.cleanup();
-                txStoreCleanup();
-            }
-        };
-        journal.setDirectory(getDirectory());
-        journal.setMaxFileLength(journalMaxFileLength);
-        journal.setWriteBatchSize(journalWriteBatchSize);
-        IOHelper.mkdirs(journal.getDirectory());
-        journal.start();
-        recoverPendingLocalTransactions();
-        store(new KahaTraceCommand().setMessage("LOADED " + new Date()));
+        if (started.compareAndSet(false, true)) {
+            journal = new Journal() {
+                @Override
+                public void cleanup() {
+                    super.cleanup();
+                    txStoreCleanup();
+                }
+            };
+            journal.setDirectory(getDirectory());
+            journal.setMaxFileLength(journalMaxFileLength);
+            journal.setWriteBatchSize(journalWriteBatchSize);
+            IOHelper.mkdirs(journal.getDirectory());
+            journal.start();
+            recoverPendingLocalTransactions();
+            store(new KahaTraceCommand().setMessage("LOADED " + new Date()));
+        }
     }
 
     private void txStoreCleanup() {
@@ -304,8 +353,10 @@ public class MultiKahaDBTransactionStore implements TransactionStore {
 
     @Override
     public void stop() throws Exception {
-        journal.close();
-        journal = null;
+        if (started.compareAndSet(true, false) && journal != null) {
+            journal.close();
+            journal = null;
+        }
     }
 
     private void recoverPendingLocalTransactions() throws IOException {
@@ -356,7 +407,7 @@ public class MultiKahaDBTransactionStore implements TransactionStore {
                 @Override
                 public void recover(XATransactionId xid, Message[] addedMessages, MessageAck[] acks) {
                     try {
-                        getTx(xid).trackStore(adapter.createTransactionStore());
+                        getTx(xid).trackStore(adapter.createTransactionStore(), xid);
                     } catch (IOException e) {
                         LOG.error("Failed to access transaction store: " + adapter + " for prepared xa tid: " + xid, e);
                     }

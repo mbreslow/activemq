@@ -17,6 +17,8 @@
 package org.apache.activemq;
 
 import javax.jms.ConnectionFactory;
+import javax.jms.Session;
+
 import junit.framework.Test;
 
 /*
@@ -31,7 +33,9 @@ public class JMSXAConsumerTest extends JMSConsumerTest {
 
     @Override
     protected ConnectionFactory createConnectionFactory() throws Exception {
-        return new ActiveMQXAConnectionFactory("vm://localhost");
+        ActiveMQXAConnectionFactory activeMQXAConnectionFactory = new ActiveMQXAConnectionFactory("vm://localhost?jms.xaAckMode=1");
+        activeMQXAConnectionFactory.setXaAckMode(Session.AUTO_ACKNOWLEDGE);
+        return activeMQXAConnectionFactory;
     }
 
     // some tests use transactions, these will not work unless an XA transaction is in place
@@ -46,5 +50,15 @@ public class JMSXAConsumerTest extends JMSConsumerTest {
     }
 
     public void testMessageListenerOnMessageCloseUnackedWithPrefetch1StayInQueue() throws Exception {
+    }
+
+    // needs client ack, xa is auto ack if no transaction
+    public void testExceptionOnClientAckAfterConsumerClose() throws Exception {
+    }
+
+    public void testReceiveTopicWithPrefetch1() throws Exception {
+    }
+
+    public void testReceiveQueueWithPrefetch1() throws Exception {
     }
 }

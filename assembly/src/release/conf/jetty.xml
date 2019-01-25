@@ -46,19 +46,27 @@
         <property name="pathSpec" value="*.action" />
     </bean>
     
+    <bean id="rewriteHandler" class="org.eclipse.jetty.rewrite.handler.RewriteHandler">
+        <property name="rules">
+            <list>
+                <bean id="header" class="org.eclipse.jetty.rewrite.handler.HeaderPatternRule">
+                  <property name="pattern" value="*"/>
+                  <property name="name" value="X-FRAME-OPTIONS"/>
+                  <property name="value" value="SAMEORIGIN"/>
+                </bean>
+            </list>
+        </property>
+    </bean>
+    
 	<bean id="secHandlerCollection" class="org.eclipse.jetty.server.handler.HandlerCollection">
 		<property name="handlers">
 			<list>
+   	            <ref bean="rewriteHandler"/>
 				<bean class="org.eclipse.jetty.webapp.WebAppContext">
 					<property name="contextPath" value="/admin" />
 					<property name="resourceBase" value="${activemq.home}/webapps/admin" />
 					<property name="logUrlOnStart" value="true" />
 				</bean>
-				<!-- Enable embedded file server for Blob messages -->
-				<!-- <bean class="org.eclipse.jetty.webapp.WebAppContext"> <property name="contextPath" 
-					value="/fileserver" /> <property name="resourceBase" value="${activemq.home}/webapps/fileserver" 
-					/> <property name="logUrlOnStart" value="true" /> <property name="parentLoaderPriority" 
-					value="true" /> </bean> -->
 				<bean class="org.eclipse.jetty.webapp.WebAppContext">
 					<property name="contextPath" value="/api" />
 					<property name="resourceBase" value="${activemq.home}/webapps/api" />
@@ -98,7 +106,7 @@
 
     <bean id="jettyPort" class="org.apache.activemq.web.WebConsolePort" init-method="start">
              <!-- the default port number for the web console -->
-        <property name="host" value="0.0.0.0"/>
+        <property name="host" value="127.0.0.1"/>
         <property name="port" value="8161"/>
     </bean>
 

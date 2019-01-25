@@ -29,6 +29,7 @@ import org.apache.activemq.command.MessageAck;
 import org.apache.activemq.command.MessageId;
 import org.apache.activemq.command.SubscriptionInfo;
 import org.apache.activemq.store.MessageRecoveryListener;
+import org.apache.activemq.store.MessageStoreSubscriptionStatistics;
 import org.apache.activemq.store.TopicMessageStore;
 import org.apache.activemq.transaction.Synchronization;
 import org.apache.activemq.util.Callback;
@@ -187,8 +188,10 @@ public class JournalTopicMessageStore extends JournalMessageStore implements Top
                 while (iterator.hasNext()) {
                     SubscriptionKey subscriptionKey = iterator.next();
                     MessageId identity = cpAckedLastAckLocations.get(subscriptionKey);
+                    MessageAck ack = new MessageAck();
+                    ack.setMessageID(identity);
                     longTermStore.acknowledge(transactionTemplate.getContext(), subscriptionKey.clientId,
-                                              subscriptionKey.subscriptionName, identity, null);
+                                              subscriptionKey.subscriptionName, identity, ack);
                 }
 
             }
@@ -230,4 +233,10 @@ public class JournalTopicMessageStore extends JournalMessageStore implements Top
         longTermStore.resetBatching(clientId, subscriptionName);
     }
 
+    private final MessageStoreSubscriptionStatistics stats = new MessageStoreSubscriptionStatistics(false);
+
+    @Override
+    public MessageStoreSubscriptionStatistics getMessageStoreSubStatistics() {
+        return stats;
+    }
 }

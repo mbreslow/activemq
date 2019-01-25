@@ -737,7 +737,7 @@ class DBManager(val parent:LevelDBStore) {
         lastmsgid = msg.getMessageId
         count += 1
       }
-      count < max
+      count < max && listener.canRecoveryNextMessage
     }
     if( lastmsgid==null ) {
       startPos
@@ -784,6 +784,9 @@ class DBManager(val parent:LevelDBStore) {
     }
     if( info.getDestination!=null ) {
       record.setDestinationName(info.getDestination.getQualifiedName)
+    }
+    if ( info.getSubscribedDestination!=null) {
+      record.setSubscribedDestinationName(info.getSubscribedDestination.getQualifiedName)
     }
     val collection = new CollectionRecord.Bean()
     collection.setType(SUBSCRIPTION_COLLECTION_TYPE)
@@ -854,8 +857,11 @@ class DBManager(val parent:LevelDBStore) {
           if( sr.hasSelector ) {
             info.setSelector(sr.getSelector)
           }
-          if(sr.hasDestinationName) {
-            info.setSubscribedDestination(ActiveMQDestination.createDestination(sr.getDestinationName, ActiveMQDestination.TOPIC_TYPE))
+          if( sr.hasDestinationName ) {
+            info.setDestination(ActiveMQDestination.createDestination(sr.getDestinationName, ActiveMQDestination.TOPIC_TYPE))
+          }
+          if( sr.hasSubscribedDestinationName ) {
+            info.setSubscribedDestination(ActiveMQDestination.createDestination(sr.getSubscribedDestinationName, ActiveMQDestination.TOPIC_TYPE))
           }
 
           var sub = DurableSubscription(key, sr.getTopicKey, info)

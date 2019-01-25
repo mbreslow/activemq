@@ -18,14 +18,17 @@ package org.apache.activemq.network;
 
 import java.io.IOException;
 
+import org.apache.activemq.broker.region.DurableTopicSubscription;
 import org.apache.activemq.broker.region.RegionBroker;
 import org.apache.activemq.broker.region.Subscription;
 import org.apache.activemq.broker.region.TopicRegion;
 import org.apache.activemq.command.ActiveMQDestination;
 import org.apache.activemq.command.ConsumerId;
 import org.apache.activemq.command.ConsumerInfo;
+import org.apache.activemq.command.RemoveSubscriptionInfo;
 import org.apache.activemq.filter.DestinationFilter;
 import org.apache.activemq.transport.Transport;
+import org.apache.activemq.util.NetworkBridgeUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -72,12 +75,15 @@ public class DurableConduitBridge extends ConduitBridge {
                             String candidateSubName = getSubscriberName(dest);
                             for (Subscription subscription : topicRegion.getDurableSubscriptions().values()) {
                                 String subName = subscription.getConsumerInfo().getSubscriptionName();
-                                if (subName != null && subName.equals(candidateSubName)) {
-                                    DemandSubscription sub = createDemandSubscription(dest);
-                                    sub.getLocalInfo().setSubscriptionName(getSubscriberName(dest));
-                                    sub.setStaticallyIncluded(true);
-                                    addSubscription(sub);
-                                    break;
+                                String clientId = subscription.getContext().getClientId();
+                                if (subName != null && subName.equals(candidateSubName) && clientId.startsWith(configuration.getName())) {
+                                    DemandSubscription sub = createDemandSubscription(dest, subName);
+                                    if (sub != null) {
+                                        sub.getLocalInfo().setSubscriptionName(getSubscriberName(dest));
+                                        sub.setStaticallyIncluded(true);
+                                        addSubscription(sub);
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -85,6 +91,35 @@ public class DurableConduitBridge extends ConduitBridge {
                         LOG.error("Failed to add static destination {}", dest, e);
                     }
                     LOG.trace("Forwarding messages for durable destination: {}", dest);
+                } else if (configuration.isSyncDurableSubs() && !isPermissableDestination(dest)) {
+                    if (dest.isTopic()) {
+                        RegionBroker regionBroker = (RegionBroker) brokerService.getRegionBroker();
+                        TopicRegion topicRegion = (TopicRegion) regionBroker.getTopicRegion();
+
+                        String candidateSubName = getSubscriberName(dest);
+                        for (Subscription subscription : topicRegion.getDurableSubscriptions().values()) {
+                            String subName = subscription.getConsumerInfo().getSubscriptionName();
+                            if (subName != null && subName.equals(candidateSubName) &&
+                                    subscription instanceof DurableTopicSubscription) {
+                               try {
+                                    DurableTopicSubscription durableSub = (DurableTopicSubscription) subscription;
+                                    //check the clientId so we only remove subs for the matching bridge
+                                    if (durableSub.getSubscriptionKey().getClientId().equals(localClientId)) {
+                                        // remove the NC subscription as it is no longer for a permissible dest
+                                        RemoveSubscriptionInfo sending = new RemoveSubscriptionInfo();
+                                        sending.setClientId(localClientId);
+                                        sending.setSubscriptionName(subName);
+                                        sending.setConnectionId(this.localConnectionInfo.getConnectionId());
+                                        localBroker.oneway(sending);
+                                    }
+                                } catch (IOException e) {
+                                    LOG.debug("Exception removing NC durable subscription: {}", subName, e);
+                                    serviceRemoteException(e);
+                                }
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -92,22 +127,31 @@ public class DurableConduitBridge extends ConduitBridge {
 
     @Override
     protected DemandSubscription createDemandSubscription(ConsumerInfo info) throws IOException {
-        if (addToAlreadyInterestedConsumers(info)) {
+        boolean isForcedDurable = NetworkBridgeUtils.isForcedDurable(info,
+                dynamicallyIncludedDestinations, staticallyIncludedDestinations);
+
+        if (addToAlreadyInterestedConsumers(info, isForcedDurable)) {
             return null; // don't want this subscription added
         }
         //add our original id to ourselves
         info.addNetworkConsumerId(info.getConsumerId());
+        ConsumerId forcedDurableId = isForcedDurable ? info.getConsumerId() : null;
 
-        if (info.isDurable()) {
+        if(info.isDurable() || isForcedDurable) {
             // set the subscriber name to something reproducible
             info.setSubscriptionName(getSubscriberName(info.getDestination()));
             // and override the consumerId with something unique so that it won't
             // be removed if the durable subscriber (at the other end) goes away
-            info.setConsumerId(new ConsumerId(localSessionInfo.getSessionId(),
+           info.setConsumerId(new ConsumerId(localSessionInfo.getSessionId(),
                                consumerIdGenerator.getNextSequenceId()));
         }
         info.setSelector(null);
-        return doCreateDemandSubscription(info);
+        DemandSubscription demandSubscription = doCreateDemandSubscription(info);
+        if (forcedDurableId != null) {
+            demandSubscription.addForcedDurableConsumer(forcedDurableId);
+            forcedDurableRemoteId.add(forcedDurableId);
+        }
+        return demandSubscription;
     }
 
     protected String getSubscriberName(ActiveMQDestination dest) {

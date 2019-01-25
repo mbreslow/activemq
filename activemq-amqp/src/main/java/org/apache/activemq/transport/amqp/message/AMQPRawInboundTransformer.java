@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
@@ -16,15 +16,16 @@
  */
 package org.apache.activemq.transport.amqp.message;
 
-import javax.jms.BytesMessage;
-import javax.jms.DeliveryMode;
+import static org.apache.activemq.transport.amqp.message.AmqpMessageSupport.JMS_AMQP_MESSAGE_FORMAT;
+import static org.apache.activemq.transport.amqp.message.AmqpMessageSupport.JMS_AMQP_NATIVE;
+
 import javax.jms.Message;
 
-public class AMQPRawInboundTransformer extends InboundTransformer {
+import org.apache.activemq.command.ActiveMQBytesMessage;
+import org.apache.activemq.command.ActiveMQMessage;
+import org.apache.activemq.util.ByteSequence;
 
-    public AMQPRawInboundTransformer(JMSVendor vendor) {
-        super(vendor);
-    }
+public class AMQPRawInboundTransformer extends InboundTransformer {
 
     @Override
     public String getTransformerName() {
@@ -33,28 +34,28 @@ public class AMQPRawInboundTransformer extends InboundTransformer {
 
     @Override
     public InboundTransformer getFallbackTransformer() {
-        return null;  // No fallback from full raw transform
+        return null;  // No fallback from full raw transform, message likely dropped.
     }
 
     @Override
-    public Message transform(EncodedMessage amqpMessage) throws Exception {
-        BytesMessage rc = vendor.createBytesMessage();
-        rc.writeBytes(amqpMessage.getArray(), amqpMessage.getArrayOffset(), amqpMessage.getLength());
+    protected ActiveMQMessage doTransform(EncodedMessage amqpMessage) throws Exception {
+        ActiveMQBytesMessage result = new ActiveMQBytesMessage();
+        result.setContent(new ByteSequence(amqpMessage.getArray(), amqpMessage.getArrayOffset(), amqpMessage.getLength()));
 
         // We cannot decode the message headers to check so err on the side of caution
         // and mark all messages as persistent.
-        rc.setJMSDeliveryMode(DeliveryMode.PERSISTENT);
-        rc.setJMSPriority(defaultPriority);
+        result.setPersistent(true);
+        result.setPriority((byte) Message.DEFAULT_PRIORITY);
 
         final long now = System.currentTimeMillis();
-        rc.setJMSTimestamp(now);
-        if (defaultTtl > 0) {
-            rc.setJMSExpiration(now + defaultTtl);
+        result.setTimestamp(now);
+
+        if (amqpMessage.getMessageFormat() != 0) {
+            result.setLongProperty(JMS_AMQP_MESSAGE_FORMAT, amqpMessage.getMessageFormat());
         }
 
-        rc.setLongProperty(prefixVendor + "MESSAGE_FORMAT", amqpMessage.getMessageFormat());
-        rc.setBooleanProperty(prefixVendor + "NATIVE", true);
+        result.setBooleanProperty(JMS_AMQP_NATIVE, true);
 
-        return rc;
+        return result;
     }
 }

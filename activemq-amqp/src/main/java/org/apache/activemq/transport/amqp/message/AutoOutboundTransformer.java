@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
@@ -16,30 +16,31 @@
  */
 package org.apache.activemq.transport.amqp.message;
 
+import static org.apache.activemq.transport.amqp.message.AmqpMessageSupport.JMS_AMQP_NATIVE;
+
 import javax.jms.BytesMessage;
-import javax.jms.Message;
+
+import org.apache.activemq.command.ActiveMQBytesMessage;
+import org.apache.activemq.command.ActiveMQMessage;
 
 public class AutoOutboundTransformer extends JMSMappingOutboundTransformer {
 
-    private final JMSMappingOutboundTransformer transformer;
-
-    public AutoOutboundTransformer(JMSVendor vendor) {
-        super(vendor);
-        transformer = new JMSMappingOutboundTransformer(vendor);
-    }
+    private final JMSMappingOutboundTransformer transformer = new JMSMappingOutboundTransformer();
 
     @Override
-    public EncodedMessage transform(Message msg) throws Exception {
-        if( msg == null )
+    public EncodedMessage transform(ActiveMQMessage message) throws Exception {
+        if (message == null) {
             return null;
-        if( msg.getBooleanProperty(prefixVendor + "NATIVE") ) {
-            if( msg instanceof BytesMessage ) {
-                return AMQPNativeOutboundTransformer.transform(this, (BytesMessage)msg);
+        }
+
+        if (message.getBooleanProperty(JMS_AMQP_NATIVE)) {
+            if (message instanceof BytesMessage) {
+                return AMQPNativeOutboundTransformer.transform(this, (ActiveMQBytesMessage) message);
             } else {
                 return null;
             }
         } else {
-            return transformer.transform(msg);
+            return transformer.transform(message);
         }
     }
 }

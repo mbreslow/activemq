@@ -58,8 +58,9 @@ public class MQTTWSConnection extends WebSocketAdapter implements WebSocketListe
     private final CountDownLatch connectLatch = new CountDownLatch(1);
     private final MQTTWireFormat wireFormat = new MQTTWireFormat();
 
-    private final BlockingQueue<MQTTFrame> prefetch = new LinkedBlockingDeque<MQTTFrame>();
+    private final BlockingQueue<MQTTFrame> prefetch = new LinkedBlockingDeque<>();
 
+    private boolean writePartialFrames;
     private int closeCode = -1;
     private String closeMessage;
 
@@ -74,6 +75,10 @@ public class MQTTWSConnection extends WebSocketAdapter implements WebSocketListe
         }
     }
 
+    protected Session getConnection() {
+        return connection;
+    }
+
     //----- Connection and Disconnection methods -----------------------------//
 
     public void connect() throws Exception {
@@ -81,21 +86,28 @@ public class MQTTWSConnection extends WebSocketAdapter implements WebSocketListe
     }
 
     public void connect(String clientId) throws Exception {
-        checkConnected();
-
         CONNECT command = new CONNECT();
-
         command.clientId(new UTF8Buffer(clientId));
         command.cleanSession(false);
         command.version(3);
         command.keepAlive((short) 0);
+        connect(command);
+    }
 
-        ByteSequence payload = wireFormat.marshal(command.encode());
-        connection.getRemote().sendBytes(ByteBuffer.wrap(payload.data));
+    public void connect(CONNECT command) throws Exception {
+        checkConnected();
+
+        sendBytes(wireFormat.marshal(command.encode()));
 
         MQTTFrame incoming = receive(15, TimeUnit.SECONDS);
+
         if (incoming == null || incoming.messageType() != CONNACK.TYPE) {
             throw new IOException("Failed to connect to remote service.");
+        } else {
+            CONNACK connack = new CONNACK().decode(incoming);
+            if (!connack.code().equals(CONNACK.Code.CONNECTION_ACCEPTED)) {
+                throw new IOException("Failed to connect to remote service: " + connack.code());
+            }
         }
     }
 
@@ -105,22 +117,19 @@ public class MQTTWSConnection extends WebSocketAdapter implements WebSocketListe
         }
 
         DISCONNECT command = new DISCONNECT();
-        ByteSequence payload = wireFormat.marshal(command.encode());
-        connection.getRemote().sendBytes(ByteBuffer.wrap(payload.data));
+        sendBytes(wireFormat.marshal(command.encode()));
     }
 
     //---- Send methods ------------------------------------------------------//
 
     public void sendFrame(MQTTFrame frame) throws Exception {
         checkConnected();
-        ByteSequence payload = wireFormat.marshal(frame);
-        connection.getRemote().sendBytes(ByteBuffer.wrap(payload.data));
+        sendBytes(wireFormat.marshal(frame));
     }
 
     public void keepAlive() throws Exception {
         checkConnected();
-        ByteSequence payload = wireFormat.marshal(new PINGREQ().encode());
-        connection.getRemote().sendBytes(ByteBuffer.wrap(payload.data));
+        sendBytes(wireFormat.marshal(new PINGREQ().encode()));
     }
 
     //----- Receive methods --------------------------------------------------//
@@ -158,6 +167,15 @@ public class MQTTWSConnection extends WebSocketAdapter implements WebSocketListe
 
     public String getCloseMessage() {
         return closeMessage;
+    }
+
+    public boolean isWritePartialFrames() {
+        return writePartialFrames;
+    }
+
+    public MQTTWSConnection setWritePartialFrames(boolean value) {
+        this.writePartialFrames = value;
+        return this;
     }
 
     //----- WebSocket callback handlers --------------------------------------//
@@ -234,15 +252,23 @@ public class MQTTWSConnection extends WebSocketAdapter implements WebSocketListe
 
     //----- Internal implementation ------------------------------------------//
 
+    private void sendBytes(ByteSequence payload) throws IOException {
+        if (!isWritePartialFrames()) {
+            connection.getRemote().sendBytes(ByteBuffer.wrap(payload.data, payload.offset, payload.length));
+        } else {
+            connection.getRemote().sendBytes(ByteBuffer.wrap(
+                payload.data, payload.offset, payload.length / 2));
+            connection.getRemote().sendBytes(ByteBuffer.wrap(
+                payload.data, payload.offset + payload.length / 2, payload.length / 2));
+        }
+    }
+
     private void checkConnected() throws IOException {
         if (!isConnected()) {
             throw new IOException("MQTT WS Connection is closed.");
         }
     }
 
-    /* (non-Javadoc)
-     * @see org.eclipse.jetty.websocket.api.WebSocketListener#onWebSocketClose(int, java.lang.String)
-     */
     @Override
     public void onWebSocketClose(int statusCode, String reason) {
         LOG.trace("MQTT WS Connection closed, code:{} message:{}", statusCode, reason);
@@ -253,14 +279,9 @@ public class MQTTWSConnection extends WebSocketAdapter implements WebSocketListe
 
     }
 
-    /* (non-Javadoc)
-     * @see org.eclipse.jetty.websocket.api.WebSocketListener#onWebSocketConnect(org.eclipse.jetty.websocket.api.Session)
-     */
     @Override
-    public void onWebSocketConnect(
-            org.eclipse.jetty.websocket.api.Session session) {
+    public void onWebSocketConnect(org.eclipse.jetty.websocket.api.Session session) {
         this.connection = session;
         this.connectLatch.countDown();
     }
-
 }

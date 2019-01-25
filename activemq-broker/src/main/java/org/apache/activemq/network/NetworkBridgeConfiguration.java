@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.apache.activemq.advisory.AdvisorySupport;
+import org.apache.activemq.broker.SslContext;
 import org.apache.activemq.command.ActiveMQDestination;
 import org.apache.activemq.command.ConsumerInfo;
 
@@ -29,13 +30,26 @@ import org.apache.activemq.command.ConsumerInfo;
 public class NetworkBridgeConfiguration {
 
     private boolean conduitSubscriptions = true;
+    /**
+     * Whether or not network subscriptions on queues are eligible to be conduit
+     * Default is false
+     */
+    private boolean conduitNetworkQueueSubscriptions;
+    private boolean useVirtualDestSubs;
     private boolean dynamicOnly;
+    private boolean syncDurableSubs;
     private boolean dispatchAsync = true;
     private boolean decreaseNetworkConsumerPriority;
     private int consumerPriorityBase = ConsumerInfo.NETWORK_CONSUMER_PRIORITY;
     private boolean duplex;
     private boolean bridgeTempDestinations = true;
     private int prefetchSize = 1000;
+    /**
+     * By default set to 0, which is disabled and prefetchSize value will be
+     * used instead.
+     */
+    private int advisoryPrefetchSize = 0;
+    private int advisoryAckPercentage = 75;
     private int networkTTL = 1;
     private int consumerTTL = networkTTL;
     private int messageTTL = networkTTL;
@@ -46,6 +60,7 @@ public class NetworkBridgeConfiguration {
     private String password;
     private String destinationFilter = null;
     private String name = "NC";
+    private String clientIdToken = "_";
 
     protected List<ActiveMQDestination> excludedDestinations = new CopyOnWriteArrayList<ActiveMQDestination>();
     protected List<ActiveMQDestination> dynamicallyIncludedDestinations = new CopyOnWriteArrayList<ActiveMQDestination>();
@@ -64,6 +79,12 @@ public class NetworkBridgeConfiguration {
     private boolean checkDuplicateMessagesOnDuplex = false;
 
     /**
+     * Bridge factory implementation - by default backed by static factory, which is default implementation and will rely change.
+     */
+    private BridgeFactory bridgeFactory = NetworkBridgeFactory.INSTANCE;
+    private SslContext sslContext;
+
+    /**
      * @return the conduitSubscriptions
      */
     public boolean isConduitSubscriptions() {
@@ -75,6 +96,14 @@ public class NetworkBridgeConfiguration {
      */
     public void setConduitSubscriptions(boolean conduitSubscriptions) {
         this.conduitSubscriptions = conduitSubscriptions;
+    }
+
+    public boolean isConduitNetworkQueueSubscriptions() {
+        return conduitNetworkQueueSubscriptions;
+    }
+
+    public void setConduitNetworkQueueSubscriptions(boolean conduitNetworkQueueSubscriptions) {
+        this.conduitNetworkQueueSubscriptions = conduitNetworkQueueSubscriptions;
     }
 
     /**
@@ -89,6 +118,14 @@ public class NetworkBridgeConfiguration {
      */
     public void setDynamicOnly(boolean dynamicOnly) {
         this.dynamicOnly = dynamicOnly;
+    }
+
+    public boolean isSyncDurableSubs() {
+        return syncDurableSubs;
+    }
+
+    public void setSyncDurableSubs(boolean syncDurableSubs) {
+        this.syncDurableSubs = syncDurableSubs;
     }
 
     /**
@@ -162,6 +199,14 @@ public class NetworkBridgeConfiguration {
         this.brokerName = brokerName;
     }
 
+    public String getClientIdToken() {
+        return clientIdToken;
+    }
+
+    public void setClientIdToken(String clientIdToken) {
+        this.clientIdToken = clientIdToken;
+    }
+
     /**
      * @return the networkTTL
      */
@@ -204,7 +249,41 @@ public class NetworkBridgeConfiguration {
      * @org.apache.xbean.Property propertyEditor="org.apache.activemq.util.MemoryIntPropertyEditor"
      */
     public void setPrefetchSize(int prefetchSize) {
+        if (prefetchSize < 1) {
+            throw new IllegalArgumentException("prefetchSize must be > 0"
+                    + " because network consumers do not poll for messages.");
+        }
         this.prefetchSize = prefetchSize;
+    }
+
+    public int getAdvisoryPrefetchSize() {
+        return advisoryPrefetchSize;
+    }
+
+    /**
+     * Prefetch size for advisory consumers.  Just like prefetchSize, if set, this
+     * value must be greater than 0 because network consumers do not poll for messages.
+     * Setting this to 0 or less means this value is disabled and prefetchSize will be
+     * used instead.
+     *
+     * @param advisoryPrefetchSize
+     */
+    public void setAdvisoryPrefetchSize(int advisoryPrefetchSize) {
+        this.advisoryPrefetchSize = advisoryPrefetchSize;
+    }
+
+    public int getAdvisoryAckPercentage() {
+        return advisoryAckPercentage;
+    }
+
+    /**
+     * @param advisoryAckPercentage the percentage of the advisory prefetch size
+     * value that can be dispatched before an ack will be sent, defaults to 75
+     * which means that when the number of received messages is greater than 75% of
+     * the prefetch size an ack will be sent back
+     */
+    public void setAdvisoryAckPercentage(int advisoryAckPercentage) {
+        this.advisoryAckPercentage = advisoryAckPercentage;
     }
 
     /**
@@ -237,11 +316,27 @@ public class NetworkBridgeConfiguration {
                         filter.append(".");
                         filter.append(destination.getPhysicalName());
                         delimiter = ",";
+
+                        if (useVirtualDestSubs) {
+                            filter.append(delimiter);
+                            filter.append(AdvisorySupport.VIRTUAL_DESTINATION_CONSUMER_ADVISORY_TOPIC_PREFIX);
+                            filter.append(destination.getDestinationTypeAsString());
+                            filter.append(".");
+                            filter.append(destination.getPhysicalName());
+                        }
                     }
                 }
                 return filter.toString();
             }   else {
-                return AdvisorySupport.CONSUMER_ADVISORY_TOPIC_PREFIX + ">";
+                StringBuffer filter = new StringBuffer();
+                filter.append(AdvisorySupport.CONSUMER_ADVISORY_TOPIC_PREFIX);
+                filter.append(">");
+                if (useVirtualDestSubs) {
+                    filter.append(",");
+                    filter.append(AdvisorySupport.VIRTUAL_DESTINATION_CONSUMER_ADVISORY_TOPIC_PREFIX);
+                    filter.append(">");
+                }
+                return filter.toString();
             }
         } else {
             // prepend consumer advisory prefix
@@ -449,4 +544,36 @@ public class NetworkBridgeConfiguration {
         this.checkDuplicateMessagesOnDuplex = checkDuplicateMessagesOnDuplex;
     }
 
+    public boolean isUseVirtualDestSubs() {
+        return useVirtualDestSubs;
+    }
+
+    public BridgeFactory getBridgeFactory() {
+        return bridgeFactory;
+    }
+
+    public void setBridgeFactory(BridgeFactory bridgeFactory) {
+        this.bridgeFactory = bridgeFactory;
+    }
+
+    /**
+     * This was a typo, so this is deprecated as of 5.13.1
+     */
+    @Deprecated
+    public boolean isUseVirtualDestSus() {
+        return useVirtualDestSubs;
+    }
+
+    public void setUseVirtualDestSubs(
+            boolean useVirtualDestSubs) {
+        this.useVirtualDestSubs = useVirtualDestSubs;
+    }
+
+    public void setSslContext(SslContext sslContext) {
+        this.sslContext = sslContext;
+    }
+
+    public SslContext getSslContext() {
+        return sslContext;
+    }
 }

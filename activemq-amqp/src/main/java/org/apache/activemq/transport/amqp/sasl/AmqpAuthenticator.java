@@ -30,7 +30,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * SASL Authenitcation engine.
+ * SASL Authentication engine.
  */
 public class AmqpAuthenticator {
 
@@ -54,14 +54,14 @@ public class AmqpAuthenticator {
     }
 
     /**
-     * @return true if the SASL exchange has conpleted, regardless of success.
+     * @return true if the SASL exchange has completed, regardless of success.
      */
     public boolean isDone() {
         return sasl.getOutcome() != Sasl.SaslOutcome.PN_SASL_NONE;
     }
 
     /**
-     * @return the list of all SASL mechanisms that are supported curretnly.
+     * @return the list of all SASL mechanisms that are supported currently.
      */
     public String[] getSupportedMechanisms() {
         return mechanisms;
@@ -75,17 +75,22 @@ public class AmqpAuthenticator {
                 LOG.debug("SASL [{}} Handshake started.", mechanism.getMechanismName());
 
                 mechanism.processSaslStep(sasl);
+                if (!mechanism.isFailed()) {
 
-                connectionInfo.setUserName(mechanism.getUsername());
-                connectionInfo.setPassword(mechanism.getPassword());
+                    connectionInfo.setUserName(mechanism.getUsername());
+                    connectionInfo.setPassword(mechanism.getPassword());
 
-                if (tryAuthenticate(connectionInfo, transport.getPeerCertificates())) {
-                    sasl.done(Sasl.SaslOutcome.PN_SASL_OK);
+                    if (tryAuthenticate(connectionInfo, transport.getPeerCertificates())) {
+                        sasl.done(Sasl.SaslOutcome.PN_SASL_OK);
+                    } else {
+                        sasl.done(Sasl.SaslOutcome.PN_SASL_AUTH);
+                    }
+
+                    LOG.debug("SASL [{}} Handshake complete.", mechanism.getMechanismName());
                 } else {
+                    LOG.debug("SASL [{}} Handshake failed: {}", mechanism.getMechanismName(), mechanism.getFailureReason());
                     sasl.done(Sasl.SaslOutcome.PN_SASL_AUTH);
                 }
-
-                LOG.debug("SASL [{}} Handshake complete.", mechanism.getMechanismName());
             } else {
                 LOG.info("SASL: could not find supported mechanism");
                 sasl.done(Sasl.SaslOutcome.PN_SASL_PERM);

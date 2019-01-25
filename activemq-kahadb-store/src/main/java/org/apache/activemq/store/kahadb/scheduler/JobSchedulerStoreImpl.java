@@ -59,6 +59,10 @@ import org.apache.activemq.util.IOHelper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/*
+ * @org.apache.xbean.XBean element="kahaDBJobScheduler"
+ */
+
 public class JobSchedulerStoreImpl extends AbstractKahaDBStore implements JobSchedulerStore {
 
     private static final Logger LOG = LoggerFactory.getLogger(JobSchedulerStoreImpl.class);
@@ -230,7 +234,7 @@ public class JobSchedulerStoreImpl extends AbstractKahaDBStore implements JobSch
             checkpointLock.writeLock().lock();
             try {
                 if (metaData.getPage() != null) {
-                    checkpointUpdate(true);
+                    checkpointUpdate(getCleanupOnStop());
                 }
             } finally {
                 checkpointLock.writeLock().unlock();
@@ -397,22 +401,22 @@ public class JobSchedulerStoreImpl extends AbstractKahaDBStore implements JobSch
                 Iterator<Entry<Integer, List<Integer>>> removals = metaData.getRemoveLocationTracker().iterator(tx);
                 List<Integer> orphans = new ArrayList<Integer>();
                 while (removals.hasNext()) {
-                    boolean orphanedRemve = true;
+                    boolean orphanedRemove = true;
                     Entry<Integer, List<Integer>> entry = removals.next();
 
                     // If this log is not a GC candidate then there's no need to do a check to rule it out
                     if (gcCandidateSet.contains(entry.getKey())) {
                         for (Integer addLocation : entry.getValue()) {
                             if (completeFileSet.contains(addLocation)) {
-                                orphanedRemve = false;
+                                LOG.trace("A remove in log {} has an add still in existance in {}.", entry.getKey(), addLocation);
+                                orphanedRemove = false;
                                 break;
                             }
                         }
 
                         // If it's not orphaned than we can't remove it, otherwise we
                         // stop tracking it it's log will get deleted on the next check.
-                        if (!orphanedRemve) {
-                            LOG.trace("A remove in log {} has an add still in existance.", entry.getKey());
+                        if (!orphanedRemove) {
                             gcCandidateSet.remove(entry.getKey());
                         } else {
                             LOG.trace("All removes in log {} are orphaned, file can be GC'd", entry.getKey());

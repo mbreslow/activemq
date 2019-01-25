@@ -19,8 +19,10 @@ package org.apache.activemq;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -115,7 +117,7 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
 
     private static final Logger LOG = LoggerFactory.getLogger(ActiveMQConnection.class);
 
-    public final ConcurrentMap<ActiveMQTempDestination, ActiveMQTempDestination> activeTempDestinations = new ConcurrentHashMap<ActiveMQTempDestination, ActiveMQTempDestination>();
+    public final ConcurrentMap<ActiveMQTempDestination, ActiveMQTempDestination> activeTempDestinations = new ConcurrentHashMap<>();
 
     protected boolean dispatchAsync=true;
     protected boolean alwaysSessionAsync = true;
@@ -168,13 +170,13 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
     private final AtomicBoolean closing = new AtomicBoolean(false);
     private final AtomicBoolean closed = new AtomicBoolean(false);
     private final AtomicBoolean transportFailed = new AtomicBoolean(false);
-    private final CopyOnWriteArrayList<ActiveMQSession> sessions = new CopyOnWriteArrayList<ActiveMQSession>();
-    private final CopyOnWriteArrayList<ActiveMQConnectionConsumer> connectionConsumers = new CopyOnWriteArrayList<ActiveMQConnectionConsumer>();
-    private final CopyOnWriteArrayList<TransportListener> transportListeners = new CopyOnWriteArrayList<TransportListener>();
+    private final CopyOnWriteArrayList<ActiveMQSession> sessions = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<ActiveMQConnectionConsumer> connectionConsumers = new CopyOnWriteArrayList<>();
+    private final CopyOnWriteArrayList<TransportListener> transportListeners = new CopyOnWriteArrayList<>();
 
     // Maps ConsumerIds to ActiveMQConsumer objects
-    private final ConcurrentMap<ConsumerId, ActiveMQDispatcher> dispatchers = new ConcurrentHashMap<ConsumerId, ActiveMQDispatcher>();
-    private final ConcurrentMap<ProducerId, ActiveMQMessageProducer> producers = new ConcurrentHashMap<ProducerId, ActiveMQMessageProducer>();
+    private final ConcurrentMap<ConsumerId, ActiveMQDispatcher> dispatchers = new ConcurrentHashMap<>();
+    private final ConcurrentMap<ProducerId, ActiveMQMessageProducer> producers = new ConcurrentHashMap<>();
     private final LongSequenceGenerator sessionIdGenerator = new LongSequenceGenerator();
     private final SessionId connectionSessionId;
     private final LongSequenceGenerator consumerIdGenerator = new LongSequenceGenerator();
@@ -205,6 +207,10 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
 
     private int maxThreadPoolSize = DEFAULT_THREAD_POOL_SIZE;
     private RejectedExecutionHandler rejectedTaskHandler = null;
+
+    private List<String> trustedPackages = new ArrayList<>();
+    private boolean trustAllPackages = false;
+    private int connectResponseTimeout;
 
     /**
      * Construct an <code>ActiveMQConnection</code>
@@ -321,16 +327,15 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
     public Session createSession(boolean transacted, int acknowledgeMode) throws JMSException {
         checkClosedOrFailed();
         ensureConnectionInfoSent();
-        if(!transacted) {
-            if (acknowledgeMode==Session.SESSION_TRANSACTED) {
+        if (!transacted) {
+            if (acknowledgeMode == Session.SESSION_TRANSACTED) {
                 throw new JMSException("acknowledgeMode SESSION_TRANSACTED cannot be used for an non-transacted Session");
             } else if (acknowledgeMode < Session.SESSION_TRANSACTED || acknowledgeMode > ActiveMQSession.MAX_ACK_CONSTANT) {
                 throw new JMSException("invalid acknowledgeMode: " + acknowledgeMode + ". Valid values are Session.AUTO_ACKNOWLEDGE (1), " +
                         "Session.CLIENT_ACKNOWLEDGE (2), Session.DUPS_OK_ACKNOWLEDGE (3), ActiveMQSession.INDIVIDUAL_ACKNOWLEDGE (4) or for transacted sessions Session.SESSION_TRANSACTED (0)");
             }
         }
-        return new ActiveMQSession(this, getNextSessionId(), transacted ? Session.SESSION_TRANSACTED : (acknowledgeMode == Session.SESSION_TRANSACTED
-            ? Session.AUTO_ACKNOWLEDGE : acknowledgeMode), isDispatchAsync(), isAlwaysSessionAsync());
+        return new ActiveMQSession(this, getNextSessionId(), transacted ? Session.SESSION_TRANSACTED : acknowledgeMode, isDispatchAsync(), isAlwaysSessionAsync());
     }
 
     /**
@@ -629,12 +634,7 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
      */
     @Override
     public void close() throws JMSException {
-        // Store the interrupted state and clear so that cleanup happens without
-        // leaking connection resources.  Reset in finally to preserve state.
-        boolean interrupted = Thread.interrupted();
-
         try {
-
             // If we were running, lets stop first.
             if (!closed.get() && !transportFailed.get()) {
                 // do not fail if already closed as according to JMS spec we must not
@@ -678,34 +678,36 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
 
                     this.activeTempDestinations.clear();
 
-                    if (isConnectionInfoSentToBroker) {
-                        // If we announced ourselves to the broker.. Try to let the broker
-                        // know that the connection is being shutdown.
-                        RemoveInfo removeCommand = info.createRemoveCommand();
-                        removeCommand.setLastDeliveredSequenceId(lastDeliveredSequenceId);
-                        try {
-                            doSyncSendPacket(removeCommand, closeTimeout);
-                        } catch (JMSException e) {
-                            if (e.getCause() instanceof RequestTimedOutIOException) {
-                                // expected
-                            } else {
-                                throw e;
+                    try {
+                        if (isConnectionInfoSentToBroker) {
+                            // If we announced ourselves to the broker.. Try to let the broker
+                            // know that the connection is being shutdown.
+                            RemoveInfo removeCommand = info.createRemoveCommand();
+                            removeCommand.setLastDeliveredSequenceId(lastDeliveredSequenceId);
+                            try {
+                                syncSendPacket(removeCommand, closeTimeout);
+                            } catch (JMSException e) {
+                                if (e.getCause() instanceof RequestTimedOutIOException) {
+                                    // expected
+                                } else {
+                                    throw e;
+                                }
                             }
+                            doAsyncSendPacket(new ShutdownInfo());
                         }
-                        doAsyncSendPacket(new ShutdownInfo());
-                    }
+                    } finally { // release anyway even if previous communication fails
+                        started.set(false);
 
-                    started.set(false);
-
-                    // TODO if we move the TaskRunnerFactory to the connection
-                    // factory
-                    // then we may need to call
-                    // factory.onConnectionClose(this);
-                    if (sessionTaskRunner != null) {
-                        sessionTaskRunner.shutdown();
+                        // TODO if we move the TaskRunnerFactory to the connection
+                        // factory
+                        // then we may need to call
+                        // factory.onConnectionClose(this);
+                        if (sessionTaskRunner != null) {
+                            sessionTaskRunner.shutdown();
+                        }
+                        closed.set(true);
+                        closing.set(false);
                     }
-                    closed.set(true);
-                    closing.set(false);
                 }
             }
         } finally {
@@ -720,9 +722,6 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
             ServiceSupport.dispose(this.transport);
 
             factoryStats.removeConnection(this);
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
         }
     }
 
@@ -819,7 +818,7 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
 
         // Allows the options on the destination to configure the consumerInfo
         if (info.getDestination().getOptions() != null) {
-            Map<String, String> options = new HashMap<String, String>(info.getDestination().getOptions());
+            Map<String, String> options = new HashMap<>(info.getDestination().getOptions());
             IntrospectionSupport.setProperties(this.info, options, "consumer.");
         }
 
@@ -1238,7 +1237,7 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
 
         // Allows the options on the destination to configure the consumerInfo
         if (consumerInfo.getDestination().getOptions() != null) {
-            Map<String, String> options = new HashMap<String, String>(consumerInfo.getDestination().getOptions());
+            Map<String, String> options = new HashMap<>(consumerInfo.getDestination().getOptions());
             IntrospectionSupport.setProperties(consumerInfo, options, "consumer.");
         }
 
@@ -1341,11 +1340,11 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
                         } catch (Exception e) {
                             exception = e;
                         }
-                        if(exception!=null) {
+                        if (exception != null) {
                             if ( exception instanceof JMSException) {
                                 onComplete.onException((JMSException) exception);
                             } else {
-                                if (isClosed()||closing.get()) {
+                                if (isClosed() || closing.get()) {
                                     LOG.debug("Received an exception but connection is closing");
                                 }
                                 JMSException jmsEx = null;
@@ -1356,9 +1355,13 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
                                 }
                                 // dispose of transport for security exceptions on connection initiation
                                 if (exception instanceof SecurityException && command instanceof ConnectionInfo){
-                                    forceCloseOnSecurityException(exception);
+                                    try {
+                                        forceCloseOnSecurityException(exception);
+                                    } catch (Throwable t) {
+                                        // We throw the original error from the ExceptionResponse instead.
+                                    }
                                 }
-                                if (jmsEx !=null) {
+                                if (jmsEx != null) {
                                     onComplete.onException(jmsEx);
                                 }
                             }
@@ -1378,19 +1381,21 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
         onException(new IOException("Force close due to SecurityException on connect", exception));
     }
 
-    public Response syncSendPacket(Command command) throws JMSException {
+    public Response syncSendPacket(Command command, int timeout) throws JMSException {
         if (isClosed()) {
             throw new ConnectionClosedException();
         } else {
 
             try {
-                Response response = (Response)this.transport.request(command);
+                Response response = (Response)(timeout > 0
+                        ? this.transport.request(command, timeout)
+                        : this.transport.request(command));
                 if (response.isException()) {
                     ExceptionResponse er = (ExceptionResponse)response;
                     if (er.getException() instanceof JMSException) {
                         throw (JMSException)er.getException();
                     } else {
-                        if (isClosed()||closing.get()) {
+                        if (isClosed() || closing.get()) {
                             LOG.debug("Received an exception but connection is closing");
                         }
                         JMSException jmsEx = null;
@@ -1400,9 +1405,13 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
                             LOG.error("Caught an exception trying to create a JMSException for " +er.getException(),e);
                         }
                         if (er.getException() instanceof SecurityException && command instanceof ConnectionInfo){
-                            forceCloseOnSecurityException(er.getException());
+                            try {
+                                forceCloseOnSecurityException(er.getException());
+                            } catch (Throwable t) {
+                                // We throw the original error from the ExceptionResponse instead.
+                            }
                         }
-                        if (jmsEx !=null) {
+                        if (jmsEx != null) {
                             throw jmsEx;
                         }
                     }
@@ -1423,32 +1432,8 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
      *
      * @throws JMSException
      */
-    public Response syncSendPacket(Command command, int timeout) throws JMSException {
-        if (isClosed() || closing.get()) {
-            throw new ConnectionClosedException();
-        } else {
-            return doSyncSendPacket(command, timeout);
-        }
-    }
-
-    private Response doSyncSendPacket(Command command, int timeout)
-            throws JMSException {
-        try {
-            Response response = (Response) (timeout > 0
-                    ? this.transport.request(command, timeout)
-                    : this.transport.request(command));
-            if (response != null && response.isException()) {
-                ExceptionResponse er = (ExceptionResponse)response;
-                if (er.getException() instanceof JMSException) {
-                    throw (JMSException)er.getException();
-                } else {
-                    throw JMSExceptionSupport.create(er.getException());
-                }
-            }
-            return response;
-        } catch (IOException e) {
-            throw JMSExceptionSupport.create(e);
-        }
+    public Response syncSendPacket(Command command) throws JMSException {
+        return syncSendPacket(command, 0);
     }
 
     /**
@@ -1498,7 +1483,7 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
             if (info.getClientId() == null || info.getClientId().trim().length() == 0) {
                 info.setClientId(clientIdGenerator.generateId());
             }
-            syncSendPacket(info.copy());
+            syncSendPacket(info.copy(), getConnectResponseTimeout());
 
             this.isConnectionInfoSentToBroker = true;
             // Add a temp destination advisory consumer so that
@@ -1576,6 +1561,10 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
      */
     public void cleanup() throws JMSException {
         doCleanup(false);
+    }
+
+    public boolean isUserSpecifiedClientID() {
+        return userSpecifiedClientID;
     }
 
     public void doCleanup(boolean removeConnection) throws JMSException {
@@ -1896,7 +1885,6 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
 
                     @Override
                     public Response processControlCommand(ControlCommand command) throws Exception {
-                        onControlCommand(command);
                         return null;
                     }
 
@@ -1989,7 +1977,7 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
     @Override
     public void onException(final IOException error) {
         onAsyncException(error);
-        if (!closing.get() && !closed.get()) {
+        if (!closed.get() && !closing.get()) {
             executor.execute(new Runnable() {
                 @Override
                 public void run() {
@@ -2241,25 +2229,6 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
             asyncSendPacket(msg);
         } else {
             syncSendPacket(msg);
-        }
-    }
-
-    protected void onControlCommand(ControlCommand command) {
-        String text = command.getCommand();
-        if (text != null) {
-            if ("shutdown".equals(text)) {
-                LOG.info("JVM told to shutdown");
-                System.exit(0);
-            }
-
-            // TODO Should we handle the "close" case?
-            // if (false && "close".equals(text)){
-            //     LOG.error("Broker " + getBrokerInfo() + "shutdown connection");
-            //     try {
-            //         close();
-            //     } catch (JMSException e) {
-            //     }
-            // }
         }
     }
 
@@ -2590,5 +2559,29 @@ public class ActiveMQConnection implements Connection, TopicConnection, QueueCon
      */
     public void setConsumerExpiryCheckEnabled(boolean consumerExpiryCheckEnabled) {
         this.consumerExpiryCheckEnabled = consumerExpiryCheckEnabled;
+    }
+
+    public List<String> getTrustedPackages() {
+        return trustedPackages;
+    }
+
+    public void setTrustedPackages(List<String> trustedPackages) {
+        this.trustedPackages = trustedPackages;
+    }
+
+    public boolean isTrustAllPackages() {
+        return trustAllPackages;
+    }
+
+    public void setTrustAllPackages(boolean trustAllPackages) {
+        this.trustAllPackages = trustAllPackages;
+    }
+
+    public int getConnectResponseTimeout() {
+        return connectResponseTimeout;
+    }
+
+    public void setConnectResponseTimeout(int connectResponseTimeout) {
+        this.connectResponseTimeout = connectResponseTimeout;
     }
 }

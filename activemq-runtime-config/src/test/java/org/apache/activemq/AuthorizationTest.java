@@ -16,18 +16,11 @@
  */
 package org.apache.activemq;
 
-import javax.jms.JMSException;
-import javax.jms.MessageConsumer;
-import javax.jms.MessageProducer;
-import javax.jms.Session;
-
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+
 import org.junit.Test;
 
-public class AuthorizationTest extends RuntimeConfigTestSupport {
+public class AuthorizationTest extends AbstractAuthorizationTest {
 
     private static final int RECEIVE_TIMEOUT = 1000;
     String configurationSeed = "authorizationTest";
@@ -41,6 +34,7 @@ public class AuthorizationTest extends RuntimeConfigTestSupport {
 
         assertAllowed("user", "USERS.A");
         assertDenied("user", "GUESTS.A");
+        assertDenied("guest", "GUESTS.A");
 
         assertDeniedTemp("guest");
 
@@ -73,6 +67,37 @@ public class AuthorizationTest extends RuntimeConfigTestSupport {
     }
 
     @Test
+    public void testModAddWrite() throws Exception {
+        final String brokerConfig = configurationSeed + "-auth-rm-broker";
+        applyNewConfig(brokerConfig, configurationSeed + "-users");
+        startBroker(brokerConfig);
+        assertTrue("broker alive", brokerService.isStarted());
+
+        assertAllowedWrite("user", "USERS.A");
+        assertDeniedWrite("guest", "USERS.A");
+
+        applyNewConfig(brokerConfig, configurationSeed + "-users-add-write-guest", SLEEP);
+
+        assertAllowedWrite("user", "USERS.A");
+        assertAllowedWrite("guest", "USERS.A");
+    }
+
+    @Test
+    public void testModWithGroupClass() throws Exception {
+        final String brokerConfig = configurationSeed + "-auth-add-guest-broker";
+        applyNewConfig(brokerConfig, configurationSeed + "-users");
+        startBroker(brokerConfig);
+        assertTrue("broker alive", brokerService.isStarted());
+
+        assertAllowed("user", "USERS.A");
+        applyNewConfig(brokerConfig, configurationSeed + "-users-dud-groupClass", SLEEP);
+        assertDenied("user", "USERS.A");
+
+        applyNewConfig(brokerConfig, configurationSeed + "-users", SLEEP);
+        assertAllowed("user", "USERS.A");
+    }
+
+    @Test
     public void testWildcard() throws Exception {
         final String brokerConfig = configurationSeed + "-auth-broker";
         applyNewConfig(brokerConfig, configurationSeed + "-wildcard-users-guests");
@@ -102,47 +127,6 @@ public class AuthorizationTest extends RuntimeConfigTestSupport {
 
 
         assertAllowedTemp("guest");
-    }
-
-    private void assertDeniedTemp(String userPass) {
-        try {
-            assertAllowedTemp(userPass);
-            fail("Expected not allowed exception");
-        } catch (Exception expected) {
-            LOG.debug("got:" + expected, expected);
-        }
-    }
-
-    private void assertAllowedTemp(String userPass) throws Exception {
-        ActiveMQConnection connection = new ActiveMQConnectionFactory("vm://localhost").createActiveMQConnection(userPass, userPass);
-        connection.start();
-        try {
-            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-            session.createConsumer(session.createTemporaryQueue());
-        } finally {
-            connection.close();
-        }
-
-    }
-
-    private void assertDenied(String userPass, String destination) {
-        try {
-            assertAllowed(userPass, destination);
-            fail("Expected not allowed exception");
-        } catch (JMSException expected) {
-            LOG.debug("got:" + expected, expected);
-        }
-    }
-
-    private void assertAllowed(String userPass, String dest) throws JMSException {
-        ActiveMQConnection connection = new ActiveMQConnectionFactory("vm://localhost").createActiveMQConnection(userPass, userPass);
-        connection.start();
-        try {
-            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-            session.createConsumer(session.createQueue(dest));
-        } finally {
-            connection.close();
-        }
     }
 
 }

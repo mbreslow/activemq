@@ -18,6 +18,7 @@ package org.apache.activemq.broker.region;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.jms.ResourceAllocationException;
 
@@ -41,6 +42,7 @@ import org.apache.activemq.store.MessageStore;
 import org.apache.activemq.thread.Scheduler;
 import org.apache.activemq.usage.MemoryUsage;
 import org.apache.activemq.usage.SystemUsage;
+import org.apache.activemq.usage.TempUsage;
 import org.apache.activemq.usage.Usage;
 import org.slf4j.Logger;
 
@@ -58,7 +60,9 @@ public abstract class BaseDestination implements Destination {
     public static final long DEFAULT_INACTIVE_TIMEOUT_BEFORE_GC = 60 * 1000;
     public static final int MAX_PRODUCERS_TO_AUDIT = 64;
     public static final int MAX_AUDIT_DEPTH = 10000;
+    public static final String DUPLICATE_FROM_STORE_MSG_PREFIX = "duplicate from store for ";
 
+    protected final AtomicBoolean started = new AtomicBoolean();
     protected final ActiveMQDestination destination;
     protected final Broker broker;
     protected final MessageStore store;
@@ -66,7 +70,7 @@ public abstract class BaseDestination implements Destination {
     protected MemoryUsage memoryUsage;
     private boolean producerFlowControl = true;
     private boolean alwaysRetroactive = false;
-    protected boolean warnOnProducerFlowControl = true;
+    protected long lastBlockedProducerWarnTime = 0l;
     protected long blockedProducerWarningInterval = DEFAULT_BLOCKED_PRODUCER_WARNING_INTERVAL;
 
     private int maxProducersToAudit = 1024;
@@ -261,6 +265,7 @@ public abstract class BaseDestination implements Destination {
     @Override
     public void removeSubscription(ConnectionContext context, Subscription sub, long lastDeliveredSequenceId) throws Exception{
         destinationStatistics.getConsumers().decrement();
+        this.lastActiveTime=0l;
     }
 
 
@@ -272,6 +277,11 @@ public abstract class BaseDestination implements Destination {
     @Override
     public void setMemoryUsage(MemoryUsage memoryUsage) {
         this.memoryUsage = memoryUsage;
+    }
+
+    @Override
+    public TempUsage getTempUsage() {
+        return systemUsage.getTempUsage();
     }
 
     @Override
@@ -296,9 +306,9 @@ public abstract class BaseDestination implements Destination {
 
     @Override
     public boolean isActive() {
-        boolean isActive = destinationStatistics.getConsumers().getCount() != 0 ||
-                           destinationStatistics.getProducers().getCount() != 0;
-        if (isActive && isGcWithNetworkConsumers() && destinationStatistics.getConsumers().getCount() != 0) {
+        boolean isActive = destinationStatistics.getConsumers().getCount() > 0 ||
+                           destinationStatistics.getProducers().getCount() > 0;
+        if (isActive && isGcWithNetworkConsumers() && destinationStatistics.getConsumers().getCount() > 0) {
             isActive = hasRegularConsumers(getConsumers());
         }
         return isActive;
@@ -316,7 +326,7 @@ public abstract class BaseDestination implements Destination {
 
     @Override
     public int getMaxBrowsePageSize() {
-        return this.maxBrowsePageSize > 0 ? this.maxBrowsePageSize : getMaxPageSize();
+        return this.maxBrowsePageSize;
     }
 
     @Override
@@ -523,6 +533,7 @@ public abstract class BaseDestination implements Destination {
      */
     @Override
     public void messageDelivered(ConnectionContext context, MessageReference messageReference) {
+        this.lastActiveTime = 0L;
         if (advisoryForDelivery) {
             broker.messageDelivered(context, messageReference);
         }
@@ -669,17 +680,24 @@ public abstract class BaseDestination implements Destination {
 
     protected final void waitForSpace(ConnectionContext context, ProducerBrokerExchange producerBrokerExchange, Usage<?> usage, int highWaterMark, String warning) throws IOException, InterruptedException, ResourceAllocationException {
         if (!context.isNetworkConnection() && systemUsage.isSendFailIfNoSpace()) {
-            getLog().debug("sendFailIfNoSpace, forcing exception on send, usage: {}: {}", usage, warning);
+            if (isFlowControlLogRequired()) {
+                getLog().info("sendFailIfNoSpace, forcing exception on send, usage: {}: {}", usage, warning);
+            } else {
+                getLog().debug("sendFailIfNoSpace, forcing exception on send, usage: {}: {}", usage, warning);
+            }
             throw new ResourceAllocationException(warning);
         }
         if (!context.isNetworkConnection() && systemUsage.getSendFailIfNoSpaceAfterTimeout() != 0) {
             if (!usage.waitForSpace(systemUsage.getSendFailIfNoSpaceAfterTimeout(), highWaterMark)) {
-                getLog().debug("sendFailIfNoSpaceAfterTimeout expired, forcing exception on send, usage: {}: {}", usage, warning);
+                if (isFlowControlLogRequired()) {
+                    getLog().info("sendFailIfNoSpaceAfterTimeout expired, forcing exception on send, usage: {}: {}", usage, warning);
+                } else {
+                    getLog().debug("sendFailIfNoSpaceAfterTimeout expired, forcing exception on send, usage: {}: {}", usage, warning);
+                }
                 throw new ResourceAllocationException(warning);
             }
         } else {
             long start = System.currentTimeMillis();
-            long nextWarn = start;
             producerBrokerExchange.blockingOnFlowControl(true);
             destinationStatistics.getBlockedSends().increment();
             while (!usage.waitForSpace(1000, highWaterMark)) {
@@ -687,10 +705,10 @@ public abstract class BaseDestination implements Destination {
                     throw new IOException("Connection closed, send aborted.");
                 }
 
-                long now = System.currentTimeMillis();
-                if (now >= nextWarn) {
-                    getLog().info("{}: {} (blocking for: {}s)", new Object[]{ usage, warning, new Long(((now - start) / 1000))});
-                    nextWarn = now + blockedProducerWarningInterval;
+                if (isFlowControlLogRequired()) {
+                    getLog().warn("{}: {} (blocking for: {}s)", new Object[]{ usage, warning, new Long(((System.currentTimeMillis() - start) / 1000))});
+                } else {
+                    getLog().debug("{}: {} (blocking for: {}s)", new Object[]{ usage, warning, new Long(((System.currentTimeMillis() - start) / 1000))});
                 }
             }
             long finish = System.currentTimeMillis();
@@ -699,6 +717,18 @@ public abstract class BaseDestination implements Destination {
             producerBrokerExchange.incrementTimeBlocked(this,totalTimeBlocked);
             producerBrokerExchange.blockingOnFlowControl(false);
         }
+    }
+
+    protected boolean isFlowControlLogRequired() {
+        boolean answer = false;
+        if (blockedProducerWarningInterval > 0) {
+            long now = System.currentTimeMillis();
+            if (lastBlockedProducerWarnTime + blockedProducerWarningInterval <= now) {
+                lastBlockedProducerWarnTime = now;
+                answer = true;
+            }
+        }
+        return answer;
     }
 
     protected abstract Logger getLog();
@@ -777,8 +807,9 @@ public abstract class BaseDestination implements Destination {
     @Override
     public boolean canGC() {
         boolean result = false;
-        if (isGcIfInactive()&& this.lastActiveTime != 0l) {
-            if ((System.currentTimeMillis() - this.lastActiveTime) >= getInactiveTimeoutBeforeGC()) {
+        final long currentLastActiveTime = this.lastActiveTime;
+        if (isGcIfInactive() && currentLastActiveTime != 0l && destinationStatistics.messages.getCount() == 0L ) {
+            if ((System.currentTimeMillis() - currentLastActiveTime) >= getInactiveTimeoutBeforeGC()) {
                 result = true;
             }
         }
@@ -789,7 +820,7 @@ public abstract class BaseDestination implements Destination {
         this.reduceMemoryFootprint = reduceMemoryFootprint;
     }
 
-    protected boolean isReduceMemoryFootprint() {
+    public boolean isReduceMemoryFootprint() {
         return this.reduceMemoryFootprint;
     }
 
@@ -827,7 +858,7 @@ public abstract class BaseDestination implements Destination {
     }
 
     public ConnectionContext createConnectionContext() {
-        ConnectionContext answer = new ConnectionContext(new NonCachedMessageEvaluationContext());
+        ConnectionContext answer = new ConnectionContext();
         answer.setBroker(this.broker);
         answer.getMessageEvaluationContext().setDestination(getActiveMQDestination());
         answer.setSecurityContext(SecurityContext.BROKER_SECURITY_CONTEXT);
@@ -857,16 +888,16 @@ public abstract class BaseDestination implements Destination {
     }
 
     @Override
-    public void duplicateFromStore(Message message, Subscription durableSub) {
+    public void duplicateFromStore(Message message, Subscription subscription) {
         ConnectionContext connectionContext = createConnectionContext();
-        getLog().warn("duplicate message from store {}, redirecting for dlq processing", message.getMessageId());
-        Throwable cause = new Throwable("duplicate from store for " + destination);
+        getLog().warn("{}{}, redirecting {} for dlq processing", DUPLICATE_FROM_STORE_MSG_PREFIX, destination, message.getMessageId());
+        Throwable cause = new Throwable(DUPLICATE_FROM_STORE_MSG_PREFIX + destination);
         message.setRegionDestination(this);
         broker.getRoot().sendToDeadLetterQueue(connectionContext, message, null, cause);
         MessageAck messageAck = new MessageAck(message, MessageAck.POSION_ACK_TYPE, 1);
         messageAck.setPoisonCause(cause);
         try {
-            acknowledge(connectionContext, durableSub, messageAck, message);
+            acknowledge(connectionContext, subscription, messageAck, message);
         } catch (IOException e) {
             getLog().error("Failed to acknowledge duplicate message {} from {} with {}", message.getMessageId(), destination, messageAck);
         }
@@ -878,5 +909,9 @@ public abstract class BaseDestination implements Destination {
 
     public boolean isPersistJMSRedelivered() {
         return persistJMSRedelivered;
+    }
+
+    public SystemUsage getSystemUsage() {
+        return systemUsage;
     }
 }

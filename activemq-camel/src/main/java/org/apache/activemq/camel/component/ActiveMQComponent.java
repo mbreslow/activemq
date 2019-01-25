@@ -17,42 +17,39 @@
 package org.apache.activemq.camel.component;
 
 import java.net.URISyntaxException;
-import java.util.*;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+
+import javax.jms.Connection;
 
 import org.apache.activemq.EnhancedConnection;
 import org.apache.activemq.Service;
 import org.apache.activemq.advisory.DestinationSource;
-import org.apache.activemq.command.ActiveMQDestination;
 import org.apache.camel.CamelContext;
-import org.apache.camel.ComponentConfiguration;
 import org.apache.camel.component.jms.JmsComponent;
 import org.apache.camel.component.jms.JmsConfiguration;
-import org.apache.camel.spi.EndpointCompleter;
 import org.apache.camel.util.IntrospectionSupport;
 import org.apache.camel.util.ObjectHelper;
 import org.apache.camel.util.URISupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jms.connection.SingleConnectionFactory;
-
-import javax.jms.Connection;
+import org.springframework.jms.core.JmsTemplate;
 
 /**
  * The <a href="http://activemq.apache.org/camel/activemq.html">ActiveMQ Component</a>
  */
-public class ActiveMQComponent extends JmsComponent implements EndpointCompleter {
+public class ActiveMQComponent extends JmsComponent {
     private final CopyOnWriteArrayList<SingleConnectionFactory> singleConnectionFactoryList =
-        new CopyOnWriteArrayList<SingleConnectionFactory>();
+            new CopyOnWriteArrayList<SingleConnectionFactory>();
     private final CopyOnWriteArrayList<Service> pooledConnectionFactoryServiceList =
-        new CopyOnWriteArrayList<Service>();
+            new CopyOnWriteArrayList<Service>();
     private static final transient Logger LOG = LoggerFactory.getLogger(ActiveMQComponent.class);
     private boolean exposeAllQueues;
     private CamelEndpointLoader endpointLoader;
 
     private EnhancedConnection connection;
     DestinationSource source;
-    boolean sourceInitialized = false;
 
     /**
      * Creates an <a href="http://camel.apache.org/activemq.html">ActiveMQ Component</a>
@@ -92,21 +89,19 @@ public class ActiveMQComponent extends JmsComponent implements EndpointCompleter
         setConfiguration(configuration);
     }
 
+    /**
+     * Sets the broker URL to use to connect to ActiveMQ using the
+     * <a href="http://activemq.apache.org/configuring-transports.html">ActiveMQ URI format</a>
+     */
     public void setBrokerURL(String brokerURL) {
         if (getConfiguration() instanceof ActiveMQConfiguration) {
             ((ActiveMQConfiguration)getConfiguration()).setBrokerURL(brokerURL);
         }
     }
 
-    public void setUserName(String userName) {
+    public void setTrustAllPackages(boolean trustAllPackages) {
         if (getConfiguration() instanceof ActiveMQConfiguration) {
-            ((ActiveMQConfiguration)getConfiguration()).setUserName(userName);
-        }
-    }
-
-    public void setPassword(String password) {
-        if (getConfiguration() instanceof ActiveMQConfiguration) {
-            ((ActiveMQConfiguration)getConfiguration()).setPassword(password);
+            ((ActiveMQConfiguration)getConfiguration()).setTrustAllPackages(trustAllPackages);
         }
     }
 
@@ -117,19 +112,33 @@ public class ActiveMQComponent extends JmsComponent implements EndpointCompleter
     /**
      * If enabled this will cause all Queues in the ActiveMQ broker to be eagerly populated into the CamelContext
      * so that they can be easily browsed by any Camel tooling. This option is disabled by default.
-     *
-     * @param exposeAllQueues
      */
     public void setExposeAllQueues(boolean exposeAllQueues) {
         this.exposeAllQueues = exposeAllQueues;
     }
 
+    /**
+     * Enables or disables whether a PooledConnectionFactory will be used so that when
+     * messages are sent to ActiveMQ from outside of a message consuming thread, pooling will be used rather
+     * than the default with the Spring {@link JmsTemplate} which will create a new connection, session, producer
+     * for each message then close them all down again.
+     * <p/>
+     * The default value is true. Note that this requires an extra dependency on commons-pool2.
+     */
     public void setUsePooledConnection(boolean usePooledConnection) {
         if (getConfiguration() instanceof ActiveMQConfiguration) {
             ((ActiveMQConfiguration)getConfiguration()).setUsePooledConnection(usePooledConnection);
         }
     }
 
+    /**
+     * Enables or disables whether a Spring {@link SingleConnectionFactory} will be used so that when
+     * messages are sent to ActiveMQ from outside of a message consuming thread, pooling will be used rather
+     * than the default with the Spring {@link JmsTemplate} which will create a new connection, session, producer
+     * for each message then close them all down again.
+     * <p/>
+     * The default value is false and a pooled connection is used by default.
+     */
     public void setUseSingleConnection(boolean useSingleConnection) {
         if (getConfiguration() instanceof ActiveMQConfiguration) {
             ((ActiveMQConfiguration)getConfiguration()).setUseSingleConnection(useSingleConnection);
@@ -174,6 +183,11 @@ public class ActiveMQComponent extends JmsComponent implements EndpointCompleter
             createDestinationSource();
             endpointLoader = new CamelEndpointLoader(getCamelContext(), source);
             endpointLoader.afterPropertiesSet();
+        }
+
+        // use OriginalDestinationPropagateStrategy by default if no custom stategy has been set
+        if (getMessageCreatedStrategy() == null) {
+            setMessageCreatedStrategy(new OriginalDestinationPropagateStrategy());
         }
     }
 
@@ -232,33 +246,4 @@ public class ActiveMQComponent extends JmsComponent implements EndpointCompleter
         return answer;
     }
 
-    @Override
-    public List<String> completeEndpointPath(ComponentConfiguration componentConfiguration, String completionText) {
-        // try to initialize destination source only the first time
-        if (!sourceInitialized) {
-            createDestinationSource();
-            sourceInitialized = true;
-        }
-        ArrayList<String> answer = new ArrayList<String>();
-        if (source != null) {
-            Set candidates = source.getQueues();
-            String destinationName = completionText;
-            if (completionText.startsWith("topic:")) {
-                candidates = source.getTopics();
-                destinationName = completionText.substring(6);
-            } else if (completionText.startsWith("queue:")) {
-                destinationName = completionText.substring(6);
-            }
-
-            Iterator it = candidates.iterator();
-
-            while (it.hasNext()) {
-                ActiveMQDestination destination = (ActiveMQDestination) it.next();
-                if (destination.getPhysicalName().startsWith(destinationName)) {
-                    answer.add(destination.getPhysicalName());
-                }
-            }
-        }
-        return answer;
-    }
 }

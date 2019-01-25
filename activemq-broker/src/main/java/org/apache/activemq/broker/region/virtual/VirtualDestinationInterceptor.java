@@ -67,7 +67,6 @@ public class VirtualDestinationInterceptor implements DestinationInterceptor {
         }
         // check if the destination instead matches any mapped destinations
         Set mappedDestinations = mappedDestinationMap.get(activeMQDestination);
-        assert mappedDestinations.size() < 2;
         if (!mappedDestinations.isEmpty()) {
             // create a mapped destination interceptor
             VirtualDestination virtualDestination = (VirtualDestination)
@@ -79,14 +78,14 @@ public class VirtualDestinationInterceptor implements DestinationInterceptor {
     }
 
     @Override
-    public synchronized void create(Broker broker, ConnectionContext context, ActiveMQDestination destination) throws Exception {
+    public void create(Broker broker, ConnectionContext context, ActiveMQDestination destination) throws Exception {
         for (VirtualDestination virt : virtualDestinations) {
             virt.create(broker, context, destination);
         }
     }
 
     @Override
-    public synchronized void remove(Destination destination) {
+    public void remove(Destination destination) {
     }
 
     public VirtualDestination[] getVirtualDestinations() {

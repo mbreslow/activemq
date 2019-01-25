@@ -33,6 +33,7 @@ import org.apache.activemq.command.ProducerInfo;
 import org.apache.activemq.store.MessageStore;
 import org.apache.activemq.thread.Task;
 import org.apache.activemq.usage.MemoryUsage;
+import org.apache.activemq.usage.TempUsage;
 import org.apache.activemq.usage.Usage;
 
 /**
@@ -69,6 +70,8 @@ public interface Destination extends Service, Task, Message.MessageDestination {
     MemoryUsage getMemoryUsage();
 
     void setMemoryUsage(MemoryUsage memoryUsage);
+
+    TempUsage getTempUsage();
 
     void dispose(ConnectionContext context) throws IOException;
 
@@ -239,7 +242,7 @@ public interface Destination extends Service, Task, Message.MessageDestination {
     boolean isDoOptimzeMessageStorage();
     void setDoOptimzeMessageStorage(boolean doOptimzeMessageStorage);
 
-    public void clearPendingMessages();
+    public void clearPendingMessages(int pendingAdditionsCount);
 
     void duplicateFromStore(Message message, Subscription subscription);
 }

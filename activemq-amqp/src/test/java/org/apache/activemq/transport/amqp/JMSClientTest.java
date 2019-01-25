@@ -36,6 +36,7 @@ import javax.jms.DeliveryMode;
 import javax.jms.Destination;
 import javax.jms.ExceptionListener;
 import javax.jms.JMSException;
+import javax.jms.MapMessage;
 import javax.jms.Message;
 import javax.jms.MessageConsumer;
 import javax.jms.MessageListener;
@@ -55,9 +56,10 @@ import org.apache.activemq.broker.jmx.BrokerView;
 import org.apache.activemq.broker.jmx.BrokerViewMBean;
 import org.apache.activemq.broker.jmx.ConnectorViewMBean;
 import org.apache.activemq.broker.jmx.QueueViewMBean;
+import org.apache.activemq.broker.jmx.SubscriptionViewMBean;
 import org.apache.activemq.transport.amqp.joram.ActiveMQAdmin;
 import org.apache.activemq.util.Wait;
-import org.junit.Ignore;
+import org.apache.qpid.jms.JmsConnectionFactory;
 import org.junit.Test;
 import org.objectweb.jtests.jms.framework.TestConfig;
 import org.slf4j.Logger;
@@ -95,6 +97,33 @@ public class JMSClientTest extends JMSClientTestSupport {
             Message msg = consumer.receive(TestConfig.TIMEOUT);
             assertNotNull(msg);
             assertTrue(msg instanceof TextMessage);
+        }
+    }
+
+    @Test(timeout = 60000)
+    public void testSendJMSMapMessage() throws Exception {
+        ActiveMQAdmin.enableJMSFrameTracing();
+
+        connection = createConnection();
+        {
+            Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+            assertNotNull(session);
+            Queue queue = session.createQueue(name.getMethodName());
+            MessageProducer producer = session.createProducer(queue);
+            MapMessage message = session.createMapMessage();
+            message.setBoolean("Boolean", false);
+            message.setString("STRING", "TEST");
+            producer.send(message);
+            QueueViewMBean proxy = getProxyToQueue(name.getMethodName());
+            assertEquals(1, proxy.getQueueSize());
+
+            MessageConsumer consumer = session.createConsumer(queue);
+            Message received = consumer.receive(5000);
+            assertNotNull(received);
+            assertTrue(received instanceof MapMessage);
+            MapMessage map = (MapMessage) received;
+            assertEquals("TEST", map.getString("STRING"));
+            assertEquals(false, map.getBooleanProperty("Boolean"));
         }
     }
 
@@ -229,7 +258,7 @@ public class JMSClientTest extends JMSClientTestSupport {
         assertEquals(totalCount, proxy.getQueueSize());
 
         // Consume again..check we receive all the messages.
-        Set<Integer> messageNumbers = new HashSet<Integer>();
+        Set<Integer> messageNumbers = new HashSet<>();
         for (int i = 1; i <= totalCount; i++) {
             messageNumbers.add(i);
         }
@@ -643,7 +672,7 @@ public class JMSClientTest extends JMSClientTestSupport {
     public void testDurableConsumerAsync() throws Exception {
         ActiveMQAdmin.enableJMSFrameTracing();
         final CountDownLatch latch = new CountDownLatch(1);
-        final AtomicReference<Message> received = new AtomicReference<Message>();
+        final AtomicReference<Message> received = new AtomicReference<>();
         String durableClientId = getDestinationName() + "-ClientId";
 
         connection = createConnection(durableClientId);
@@ -692,7 +721,7 @@ public class JMSClientTest extends JMSClientTestSupport {
             message.setText("hello");
             producer.send(message);
 
-            final AtomicReference<Message> msg = new AtomicReference<Message>();
+            final AtomicReference<Message> msg = new AtomicReference<>();
             assertTrue(Wait.waitFor(new Wait.Condition() {
 
                 @Override
@@ -711,7 +740,7 @@ public class JMSClientTest extends JMSClientTestSupport {
     public void testTopicConsumerAsync() throws Exception {
         ActiveMQAdmin.enableJMSFrameTracing();
         final CountDownLatch latch = new CountDownLatch(1);
-        final AtomicReference<Message> received = new AtomicReference<Message>();
+        final AtomicReference<Message> received = new AtomicReference<>();
 
         connection = createConnection();
         {
@@ -759,7 +788,7 @@ public class JMSClientTest extends JMSClientTestSupport {
             message.setText("hello");
             producer.send(message);
 
-            final AtomicReference<Message> msg = new AtomicReference<Message>();
+            final AtomicReference<Message> msg = new AtomicReference<>();
             assertTrue(Wait.waitFor(new Wait.Condition() {
 
                 @Override
@@ -781,7 +810,7 @@ public class JMSClientTest extends JMSClientTestSupport {
         final ConnectorViewMBean connector = getProxyToConnectionView(getTargetConnectorName());
         LOG.info("Current number of Connections is: {}", connector.connectionCount());
 
-        ArrayList<Connection> connections = new ArrayList<Connection>();
+        ArrayList<Connection> connections = new ArrayList<>();
 
         for (int i = 0; i < 10; i++) {
             connections.add(createConnection(null));
@@ -1108,7 +1137,6 @@ public class JMSClientTest extends JMSClientTestSupport {
         }
     }
 
-    @Ignore("Legacy QPid client does not support creation of TemporaryTopics correctly")
     @Test(timeout=30000)
     public void testDeleteTemporaryQueue() throws Exception {
         ActiveMQAdmin.enableJMSFrameTracing();
@@ -1179,11 +1207,155 @@ public class JMSClientTest extends JMSClientTestSupport {
         }
     }
 
+    @Test(timeout = 60000)
+    public void testZeroPrefetchWithTwoConsumers() throws Exception {
+        JmsConnectionFactory cf = new JmsConnectionFactory(getAmqpURI("jms.prefetchPolicy.all=0"));
+        connection = cf.createConnection();
+        connection.start();
+
+        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+        Queue queue = session.createQueue(getDestinationName());
+
+        MessageProducer producer = session.createProducer(queue);
+        producer.send(session.createTextMessage("Msg1"));
+        producer.send(session.createTextMessage("Msg2"));
+
+        // now lets receive it
+        MessageConsumer consumer1 = session.createConsumer(queue);
+        MessageConsumer consumer2 = session.createConsumer(queue);
+        TextMessage answer = (TextMessage)consumer1.receive(5000);
+        assertNotNull(answer);
+        assertEquals("Should have received a message!", answer.getText(), "Msg1");
+        answer = (TextMessage)consumer2.receive(5000);
+        assertNotNull(answer);
+        assertEquals("Should have received a message!", answer.getText(), "Msg2");
+
+        answer = (TextMessage)consumer2.receiveNoWait();
+        assertNull("Should have not received a message!", answer);
+    }
+
+    @Test(timeout=30000)
+    public void testRetroactiveConsumerSupported() throws Exception {
+        ActiveMQAdmin.enableJMSFrameTracing();
+
+        connection = createConnection();
+        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+        Queue queue = session.createQueue(getDestinationName() + "?consumer.retroactive=true");
+        MessageConsumer consumer = session.createConsumer(queue);
+
+        QueueViewMBean queueView = getProxyToQueue(getDestinationName());
+        assertNotNull(queueView);
+        assertEquals(1, queueView.getSubscriptions().length);
+
+        SubscriptionViewMBean subscriber = getProxyToQueueSubscriber(getDestinationName());
+        assertTrue(subscriber.isRetroactive());
+
+        consumer.close();
+    }
+
+    @Test(timeout=30000)
+    public void testExclusiveConsumerSupported() throws Exception {
+        ActiveMQAdmin.enableJMSFrameTracing();
+
+        connection = createConnection();
+        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+        Queue queue = session.createQueue(getDestinationName() + "?consumer.exclusive=true");
+        MessageConsumer consumer = session.createConsumer(queue);
+
+        QueueViewMBean queueView = getProxyToQueue(getDestinationName());
+        assertNotNull(queueView);
+        assertEquals(1, queueView.getSubscriptions().length);
+
+        SubscriptionViewMBean subscriber = getProxyToQueueSubscriber(getDestinationName());
+        assertTrue(subscriber.isExclusive());
+
+        consumer.close();
+    }
+
+    @Test(timeout=30000)
+    public void testUnpplicableDestinationOption() throws Exception {
+        ActiveMQAdmin.enableJMSFrameTracing();
+
+        connection = createConnection();
+        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+        Queue queue = session.createQueue(getDestinationName() + "?consumer.unknoen=true");
+        try {
+            session.createConsumer(queue);
+            fail("Should have failed to create consumer");
+        } catch (JMSException jmsEx) {
+        }
+    }
+
     protected void receiveMessages(MessageConsumer consumer) throws Exception {
         for (int i = 0; i < 10; i++) {
             Message message = consumer.receive(1000);
             assertNotNull(message);
             assertFalse(message.getJMSRedelivered());
         }
+    }
+
+    @Test(timeout = 30000)
+    public void testProduceAndConsumeLargeNumbersOfTopicMessagesClientAck() throws Exception {
+        doTestProduceAndConsumeLargeNumbersOfMessages(true, Session.CLIENT_ACKNOWLEDGE);
+    }
+
+    @Test(timeout = 30000)
+    public void testProduceAndConsumeLargeNumbersOfQueueMessagesClientAck() throws Exception {
+        doTestProduceAndConsumeLargeNumbersOfMessages(false, Session.CLIENT_ACKNOWLEDGE);
+    }
+
+    @Test(timeout = 30000)
+    public void testProduceAndConsumeLargeNumbersOfTopicMessagesAutoAck() throws Exception {
+        doTestProduceAndConsumeLargeNumbersOfMessages(true, Session.AUTO_ACKNOWLEDGE);
+    }
+
+    @Test(timeout = 30000)
+    public void testProduceAndConsumeLargeNumbersOfQueueMessagesAutoAck() throws Exception {
+        doTestProduceAndConsumeLargeNumbersOfMessages(false, Session.AUTO_ACKNOWLEDGE);
+    }
+
+    public void doTestProduceAndConsumeLargeNumbersOfMessages(boolean topic, int ackMode) throws Exception {
+
+        final int MSG_COUNT = 1000;
+        final CountDownLatch done = new CountDownLatch(MSG_COUNT);
+
+        JmsConnectionFactory factory = new JmsConnectionFactory(getAmqpURI());
+        factory.setForceSyncSend(true);
+
+        connection = factory.createConnection();
+        connection.start();
+
+        Session session = connection.createSession(false, ackMode);
+        final Destination destination;
+        if (topic) {
+            destination = session.createTopic(getDestinationName());
+        } else {
+            destination = session.createQueue(getDestinationName());
+        }
+
+        MessageConsumer consumer = session.createConsumer(destination);
+        consumer.setMessageListener(new MessageListener() {
+
+            @Override
+            public void onMessage(Message message) {
+                try {
+                    message.acknowledge();
+                    done.countDown();
+                } catch (JMSException ex) {
+                    LOG.info("Caught exception.", ex);
+                }
+            }
+        });
+
+        MessageProducer producer = session.createProducer(destination);
+
+        TextMessage textMessage = session.createTextMessage();
+        textMessage.setText("messageText");
+
+        for (int i = 0; i < MSG_COUNT; i++) {
+            producer.send(textMessage);
+        }
+
+        assertTrue("Did not receive all messages: " + MSG_COUNT, done.await(15, TimeUnit.SECONDS));
     }
 }

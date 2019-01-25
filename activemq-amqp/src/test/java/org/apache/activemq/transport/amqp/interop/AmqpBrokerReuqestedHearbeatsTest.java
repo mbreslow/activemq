@@ -21,6 +21,8 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -32,13 +34,29 @@ import org.apache.activemq.transport.amqp.client.AmqpValidator;
 import org.apache.activemq.util.Wait;
 import org.apache.qpid.proton.engine.Connection;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameters;
 
 /**
  * Test handling of heartbeats requested by the broker.
  */
+@RunWith(Parameterized.class)
 public class AmqpBrokerReuqestedHearbeatsTest extends AmqpClientTestSupport {
 
-    private final int TEST_IDLE_TIMEOUT = 3000;
+    private final int TEST_IDLE_TIMEOUT = 1000;
+
+    @Parameters(name="connector={0}")
+    public static Collection<Object[]> data() {
+        return Arrays.asList(new Object[][] {
+            {"amqp", false},
+            {"amqp+ws", false},
+        });
+    }
+
+    public AmqpBrokerReuqestedHearbeatsTest(String connectorScheme, boolean secure) {
+        super(connectorScheme, secure);
+    }
 
     @Override
     protected String getAdditionalConfig() {
@@ -54,13 +72,37 @@ public class AmqpBrokerReuqestedHearbeatsTest extends AmqpClientTestSupport {
 
             @Override
             public void inspectOpenedResource(Connection connection) {
-                assertEquals(TEST_IDLE_TIMEOUT / 2, connection.getTransport().getRemoteIdleTimeout());
+                assertEquals("Broker did not send half the idle timeout",
+                    TEST_IDLE_TIMEOUT / 2, connection.getTransport().getRemoteIdleTimeout());
             }
         });
 
-        AmqpConnection connection = client.connect();
+        AmqpConnection connection = trackConnection(client.connect());
         assertNotNull(connection);
 
+        connection.getStateInspector().assertValid();
+        connection.close();
+    }
+
+    @Test(timeout = 60000)
+    public void testBrokerSendsHalfConfiguredIdleTimeoutWhenClientSendsTimeout() throws Exception {
+        AmqpClient client = createAmqpClient();
+        assertNotNull(client);
+
+        client.setValidator(new AmqpValidator() {
+
+            @Override
+            public void inspectOpenedResource(Connection connection) {
+                assertEquals("Broker did not send half the idle timeout",
+                    TEST_IDLE_TIMEOUT / 2, connection.getTransport().getRemoteIdleTimeout());
+            }
+        });
+
+        AmqpConnection connection = trackConnection(client.createConnection());
+        connection.setIdleTimeout(TEST_IDLE_TIMEOUT * 4);
+        assertNotNull(connection);
+
+        connection.connect();
         connection.getStateInspector().assertValid();
         connection.close();
     }
@@ -73,7 +115,7 @@ public class AmqpBrokerReuqestedHearbeatsTest extends AmqpClientTestSupport {
         AmqpClient client = createAmqpClient();
         assertNotNull(client);
 
-        AmqpConnection connection = client.createConnection();
+        AmqpConnection connection = trackConnection(client.createConnection());
         assertNotNull(connection);
 
         connection.setIdleProcessingDisabled(true);
@@ -109,7 +151,7 @@ public class AmqpBrokerReuqestedHearbeatsTest extends AmqpClientTestSupport {
         AmqpClient client = createAmqpClient();
         assertNotNull(client);
 
-        AmqpConnection connection = client.createConnection();
+        AmqpConnection connection = trackConnection(client.createConnection());
         assertNotNull(connection);
 
         connection.setListener(new AmqpConnectionListener() {
@@ -123,7 +165,7 @@ public class AmqpBrokerReuqestedHearbeatsTest extends AmqpClientTestSupport {
         connection.connect();
 
         assertEquals(1, getProxyToBroker().getCurrentConnectionsCount());
-        assertFalse(disconnected.await(10, TimeUnit.SECONDS));
+        assertFalse(disconnected.await(5, TimeUnit.SECONDS));
 
         connection.close();
 

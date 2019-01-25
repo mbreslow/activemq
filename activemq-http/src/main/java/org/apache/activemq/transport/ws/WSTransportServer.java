@@ -23,12 +23,15 @@ import java.util.Map;
 
 import javax.servlet.Servlet;
 
+import org.apache.activemq.broker.BrokerService;
+import org.apache.activemq.broker.BrokerServiceAware;
 import org.apache.activemq.command.BrokerInfo;
 import org.apache.activemq.transport.SocketConnectorFactory;
 import org.apache.activemq.transport.WebTransportServerSupport;
 import org.apache.activemq.transport.ws.jetty9.WSServlet;
 import org.apache.activemq.util.IntrospectionSupport;
 import org.apache.activemq.util.ServiceStopper;
+import org.eclipse.jetty.security.ConstraintSecurityHandler;
 import org.eclipse.jetty.server.Connector;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.servlet.ServletContextHandler;
@@ -40,9 +43,12 @@ import org.slf4j.LoggerFactory;
  * Creates a web server and registers web socket server
  *
  */
-public class WSTransportServer extends WebTransportServerSupport {
+public class WSTransportServer extends WebTransportServerSupport implements BrokerServiceAware {
 
     private static final Logger LOG = LoggerFactory.getLogger(WSTransportServer.class);
+
+    private BrokerService brokerService;
+    private WSServlet servlet;
 
     public WSTransportServer(URI location) {
         super(location);
@@ -61,9 +67,14 @@ public class WSTransportServer extends WebTransportServerSupport {
         URI boundTo = bind();
 
         ServletContextHandler contextHandler =
-                new ServletContextHandler(server, "/", ServletContextHandler.NO_SECURITY);
+                new ServletContextHandler(server, "/", ServletContextHandler.SECURITY);
 
         ServletHolder holder = new ServletHolder();
+
+        //AMQ-6182 - disabling trace by default
+        configureTraceMethod((ConstraintSecurityHandler) contextHandler.getSecurityHandler(),
+                httpOptions.isEnableTrace());
+
         Map<String, Object> webSocketOptions = IntrospectionSupport.extractProperties(transportOptions, "websocket.");
         for(Map.Entry<String,Object> webSocketEntry : webSocketOptions.entrySet()) {
             Object value = webSocketEntry.getValue();
@@ -99,7 +110,11 @@ public class WSTransportServer extends WebTransportServerSupport {
     }
 
     private Servlet createWSServlet() throws Exception {
-        return new WSServlet();
+        servlet = new WSServlet();
+        servlet.setTransportOptions(transportOptions);
+        servlet.setBrokerService(brokerService);
+
+        return servlet;
     }
 
     private int getConnectorLocalPort() throws Exception {
@@ -130,13 +145,23 @@ public class WSTransportServer extends WebTransportServerSupport {
 
     @Override
     public void setTransportOption(Map<String, Object> transportOptions) {
+        // String transport from options and
         Map<String, Object> socketOptions = IntrospectionSupport.extractProperties(transportOptions, "transport.");
         socketConnectorFactory.setTransportOptions(socketOptions);
+        transportOptions.putAll(socketOptions);
         super.setTransportOption(transportOptions);
     }
 
     @Override
     public boolean isSslServer() {
         return false;
+    }
+
+    @Override
+    public void setBrokerService(BrokerService brokerService) {
+        this.brokerService = brokerService;
+        if (servlet != null) {
+            servlet.setBrokerService(brokerService);
+        }
     }
 }

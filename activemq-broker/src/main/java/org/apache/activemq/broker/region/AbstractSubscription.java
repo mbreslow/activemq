@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.jms.InvalidSelectorException;
 import javax.jms.JMSException;
@@ -49,7 +50,9 @@ public abstract class AbstractSubscription implements Subscription {
     protected ConsumerInfo info;
     protected final DestinationFilter destinationFilter;
     protected final CopyOnWriteArrayList<Destination> destinations = new CopyOnWriteArrayList<Destination>();
+    protected final AtomicInteger prefetchExtension = new AtomicInteger(0);
 
+    private boolean usePrefetchExtension = true;
     private BooleanExpression selectorExpression;
     private ObjectName objectName;
     private int cursorMemoryHighWaterMark = 70;
@@ -183,6 +186,14 @@ public abstract class AbstractSubscription implements Subscription {
         return info.getPrefetchSize();
     }
 
+    public boolean isUsePrefetchExtension() {
+        return usePrefetchExtension;
+    }
+
+    public void setUsePrefetchExtension(boolean usePrefetchExtension) {
+        this.usePrefetchExtension = usePrefetchExtension;
+    }
+
     public void setPrefetchSize(int newSize) {
         info.setPrefetchSize(newSize);
     }
@@ -236,8 +247,9 @@ public abstract class AbstractSubscription implements Subscription {
 
     @Override
     public int getInFlightUsage() {
-        if (info.getPrefetchSize() > 0) {
-            return (getInFlightSize() * 100)/info.getPrefetchSize();
+        int prefetchSize = info.getPrefetchSize();
+        if (prefetchSize > 0) {
+            return (getInFlightSize() * 100) / prefetchSize;
         }
         return Integer.MAX_VALUE;
     }
@@ -307,5 +319,51 @@ public abstract class AbstractSubscription implements Subscription {
     @Override
     public SubscriptionStatistics getSubscriptionStatistics() {
         return subscriptionStatistics;
+    }
+
+    public void wakeupDestinationsForDispatch() {
+        for (Destination dest : destinations) {
+            dest.wakeup();
+        }
+    }
+
+    public AtomicInteger getPrefetchExtension() {
+        return this.prefetchExtension;
+    }
+
+    protected void contractPrefetchExtension(int amount) {
+        if (isUsePrefetchExtension() && getPrefetchSize() != 0) {
+            decrementPrefetchExtension(amount);
+        }
+    }
+
+    protected void expandPrefetchExtension(int amount) {
+        if (isUsePrefetchExtension() && getPrefetchSize() != 0) {
+            incrementPrefetchExtension(amount);
+        }
+    }
+
+    protected void decrementPrefetchExtension(int amount) {
+        while (true) {
+            int currentExtension = prefetchExtension.get();
+            int newExtension = Math.max(0, currentExtension - amount);
+            if (prefetchExtension.compareAndSet(currentExtension, newExtension)) {
+                break;
+            }
+        }
+    }
+
+    private void incrementPrefetchExtension(int amount) {
+        while (true) {
+            int currentExtension = prefetchExtension.get();
+            int newExtension = Math.max(currentExtension, currentExtension + amount);
+            if (prefetchExtension.compareAndSet(currentExtension, newExtension)) {
+                break;
+            }
+        }
+    }
+
+    public CopyOnWriteArrayList<Destination> getDestinations() {
+        return destinations;
     }
 }

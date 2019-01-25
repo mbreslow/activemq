@@ -36,6 +36,7 @@ import org.apache.activemq.command.MessageAck;
 import org.apache.activemq.command.MessageId;
 import org.apache.activemq.command.SubscriptionInfo;
 import org.apache.activemq.store.MessageRecoveryListener;
+import org.apache.activemq.store.MessageStoreSubscriptionStatistics;
 import org.apache.activemq.store.TopicMessageStore;
 import org.apache.activemq.util.ByteSequence;
 import org.apache.activemq.util.IOExceptionSupport;
@@ -151,7 +152,7 @@ public class JDBCTopicMessageStore extends JDBCMessageStore implements TopicMess
         }
 
         public LastRecoveredEntry defaultPriority() {
-            return perPriority[javax.jms.Message.DEFAULT_PRIORITY];
+            return perPriority[0];
         }
 
         @Override
@@ -320,7 +321,7 @@ public class JDBCTopicMessageStore extends JDBCMessageStore implements TopicMess
     public void pendingCompletion(String clientId, String subscriptionName, long sequenceId, byte priority) {
         final String key = getSubscriptionKey(clientId, subscriptionName);
         LastRecovered recovered = new LastRecovered();
-        recovered.perPriority[isPrioritizedMessages() ? priority : javax.jms.Message.DEFAULT_PRIORITY].recovered = sequenceId;
+        recovered.perPriority[priority].recovered = sequenceId;
         subscriberLastRecoveredMap.put(key, recovered);
         pendingCompletion.add(key);
         LOG.trace(this + ", pending completion: " + key + ", last: " + recovered);
@@ -432,6 +433,13 @@ public class JDBCTopicMessageStore extends JDBCMessageStore implements TopicMess
         String result = clientId + ":";
         result += subscriberName != null ? subscriberName : "NOT_SET";
         return result;
+    }
+
+    private final MessageStoreSubscriptionStatistics stats = new MessageStoreSubscriptionStatistics(false);
+
+    @Override
+    public MessageStoreSubscriptionStatistics getMessageStoreSubStatistics() {
+        return stats;
     }
 
 }

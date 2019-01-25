@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -44,8 +45,6 @@ import org.apache.activemq.store.TransactionStore;
 /**
  * Provides a TransactionStore implementation that can create transaction aware
  * MessageStore objects from non transaction aware MessageStore objects.
- *
- *
  */
 public class MemoryTransactionStore implements TransactionStore {
 
@@ -56,9 +55,10 @@ public class MemoryTransactionStore implements TransactionStore {
     private boolean doingRecover;
 
     public class Tx {
-        public ArrayList<AddMessageCommand> messages = new ArrayList<AddMessageCommand>();
 
-        public final ArrayList<RemoveMessageCommand> acks = new ArrayList<RemoveMessageCommand>();
+        public List<AddMessageCommand> messages = Collections.synchronizedList(new ArrayList<AddMessageCommand>());
+
+        public final List<RemoveMessageCommand> acks = Collections.synchronizedList(new ArrayList<RemoveMessageCommand>());
 
         public void add(AddMessageCommand msg) {
             messages.add(msg);
@@ -107,11 +107,12 @@ public class MemoryTransactionStore implements TransactionStore {
                     cmd.run(ctx);
                 }
 
-            } catch ( IOException e ) {
+                persistenceAdapter.commitTransaction(ctx);
+
+            } catch (IOException e) {
                 persistenceAdapter.rollbackTransaction(ctx);
                 throw e;
             }
-            persistenceAdapter.commitTransaction(ctx);
         }
     }
 
@@ -134,7 +135,7 @@ public class MemoryTransactionStore implements TransactionStore {
     }
 
     public MemoryTransactionStore(PersistenceAdapter persistenceAdapter) {
-        this.persistenceAdapter=persistenceAdapter;
+        this.persistenceAdapter = persistenceAdapter;
     }
 
     public MessageStore proxy(MessageStore messageStore) {
@@ -153,13 +154,13 @@ public class MemoryTransactionStore implements TransactionStore {
             public ListenableFuture<Object> asyncAddQueueMessage(ConnectionContext context, Message message) throws IOException {
                 MemoryTransactionStore.this.addMessage(context, getDelegate(), message);
                 return new InlineListenableFuture();
-             }
+            }
 
             @Override
             public ListenableFuture<Object> asyncAddQueueMessage(ConnectionContext context, Message message, boolean canoptimize) throws IOException {
                 MemoryTransactionStore.this.addMessage(context, getDelegate(), message);
                 return new InlineListenableFuture();
-             }
+            }
 
             @Override
             public void removeMessage(ConnectionContext context, final MessageAck ack) throws IOException {
@@ -194,13 +195,13 @@ public class MemoryTransactionStore implements TransactionStore {
             public ListenableFuture<Object> asyncAddTopicMessage(ConnectionContext context, Message message) throws IOException {
                 MemoryTransactionStore.this.addMessage(context, getDelegate(), message);
                 return new InlineListenableFuture();
-             }
+            }
 
             @Override
             public ListenableFuture<Object> asyncAddTopicMessage(ConnectionContext context, Message message, boolean canOptimize) throws IOException {
                 MemoryTransactionStore.this.addMessage(context, getDelegate(), message);
                 return new InlineListenableFuture();
-             }
+            }
 
             @Override
             public void removeMessage(ConnectionContext context, final MessageAck ack) throws IOException {
@@ -213,10 +214,9 @@ public class MemoryTransactionStore implements TransactionStore {
             }
 
             @Override
-            public void acknowledge(ConnectionContext context, String clientId, String subscriptionName,
-                            MessageId messageId, MessageAck ack) throws IOException {
-                MemoryTransactionStore.this.acknowledge((TopicMessageStore)getDelegate(), clientId,
-                        subscriptionName, messageId, ack);
+            public void acknowledge(ConnectionContext context, String clientId, String subscriptionName, MessageId messageId, MessageAck ack)
+                throws IOException {
+                MemoryTransactionStore.this.acknowledge((TopicMessageStore) getDelegate(), clientId, subscriptionName, messageId, ack);
             }
         };
         onProxyTopicStore(proxyTopicMessageStore);
@@ -241,8 +241,13 @@ public class MemoryTransactionStore implements TransactionStore {
     public Tx getTx(Object txid) {
         Tx tx = inflightTransactions.get(txid);
         if (tx == null) {
-            tx = new Tx();
-            inflightTransactions.put(txid, tx);
+            synchronized (inflightTransactions) {
+                tx = inflightTransactions.get(txid);
+                if ( tx == null) {
+                    tx = new Tx();
+                    inflightTransactions.put(txid, tx);
+                }
+            }
         }
         return tx;
     }
@@ -257,19 +262,22 @@ public class MemoryTransactionStore implements TransactionStore {
     }
 
     @Override
-    public void commit(TransactionId txid, boolean wasPrepared, Runnable preCommit,Runnable postCommit) throws IOException {
+    public void commit(TransactionId txid, boolean wasPrepared, Runnable preCommit, Runnable postCommit) throws IOException {
         if (preCommit != null) {
             preCommit.run();
         }
         Tx tx;
         if (wasPrepared) {
-            tx = preparedTransactions.remove(txid);
+            tx = preparedTransactions.get(txid);
         } else {
             tx = inflightTransactions.remove(txid);
         }
 
         if (tx != null) {
             tx.commit();
+        }
+        if (wasPrepared) {
+            preparedTransactions.remove(txid);
         }
         if (postCommit != null) {
             postCommit.run();
@@ -302,7 +310,7 @@ public class MemoryTransactionStore implements TransactionStore {
             for (Iterator<TransactionId> iter = preparedTransactions.keySet().iterator(); iter.hasNext();) {
                 Object txid = iter.next();
                 Tx tx = preparedTransactions.get(txid);
-                listener.recover((XATransactionId)txid, tx.getMessages(), tx.getAcks());
+                listener.recover((XATransactionId) txid, tx.getMessages(), tx.getAcks());
                 onRecovered(tx);
             }
         } finally {
@@ -326,7 +334,9 @@ public class MemoryTransactionStore implements TransactionStore {
         if (message.getTransactionId() != null) {
             Tx tx = getTx(message.getTransactionId());
             tx.add(new AddMessageCommand() {
+                @SuppressWarnings("unused")
                 MessageStore messageStore = destination;
+
                 @Override
                 public Message getMessage() {
                     return message;
@@ -385,8 +395,8 @@ public class MemoryTransactionStore implements TransactionStore {
         }
     }
 
-    public void acknowledge(final TopicMessageStore destination, final String clientId, final String subscriptionName,
-                           final MessageId messageId, final MessageAck ack) throws IOException {
+    public void acknowledge(final TopicMessageStore destination, final String clientId, final String subscriptionName, final MessageId messageId,
+        final MessageAck ack) throws IOException {
         if (doingRecover) {
             return;
         }
@@ -414,11 +424,9 @@ public class MemoryTransactionStore implements TransactionStore {
         }
     }
 
-
     public void delete() {
         inflightTransactions.clear();
         preparedTransactions.clear();
         doingRecover = false;
     }
-
 }

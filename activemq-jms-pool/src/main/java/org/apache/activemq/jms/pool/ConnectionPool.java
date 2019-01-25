@@ -67,6 +67,11 @@ public class ConnectionPool implements ExceptionListener {
         final GenericKeyedObjectPoolConfig poolConfig = new GenericKeyedObjectPoolConfig();
         poolConfig.setJmxEnabled(false);
         this.connection = wrap(connection);
+        try {
+            this.connection.setExceptionListener(this);
+        } catch (JMSException ex) {
+            LOG.warn("Could not set exception listener on create of ConnectionPool");
+        }
 
         // Create our internal Pool of session instances.
         this.sessionPool = new GenericKeyedObjectPool<SessionKey, SessionHolder>(
@@ -79,7 +84,7 @@ public class ConnectionPool implements ExceptionListener {
 
                 @Override
                 public void destroyObject(SessionKey sessionKey, PooledObject<SessionHolder> pooledObject) throws Exception {
-                    ((SessionHolder)pooledObject.getObject()).close();
+                    pooledObject.getObject().close();
                 }
 
                 @Override
@@ -120,6 +125,9 @@ public class ConnectionPool implements ExceptionListener {
                 connection.start();
             } catch (JMSException e) {
                 started.set(false);
+                if (isReconnectOnException()) {
+                    close();
+                }
                 throw(e);
             }
         }
@@ -225,7 +233,7 @@ public class ConnectionPool implements ExceptionListener {
             }
         }
 
-        if (expiryTimeout > 0 && System.currentTimeMillis() > firstUsed + expiryTimeout) {
+        if (expiryTimeout > 0 && (firstUsed + expiryTimeout) - System.currentTimeMillis() < 0) {
             hasExpired = true;
             if (referenceCount == 0) {
                 close();
@@ -235,7 +243,7 @@ public class ConnectionPool implements ExceptionListener {
 
         // Only set hasExpired here is no references, as a Connection with references is by
         // definition not idle at this time.
-        if (referenceCount == 0 && idleTimeout > 0 && System.currentTimeMillis() > lastUsed + idleTimeout) {
+        if (referenceCount == 0 && idleTimeout > 0 && (lastUsed + idleTimeout) - System.currentTimeMillis() < 0) {
             hasExpired = true;
             close();
             expired = true;
@@ -357,26 +365,21 @@ public class ConnectionPool implements ExceptionListener {
      */
     public void setReconnectOnException(boolean reconnectOnException) {
         this.reconnectOnException = reconnectOnException;
-        try {
-            if (isReconnectOnException()) {
-                if (connection.getExceptionListener() != null) {
-                    parentExceptionListener = connection.getExceptionListener();
-                }
-                connection.setExceptionListener(this);
-            } else {
-                if (parentExceptionListener != null) {
-                    connection.setExceptionListener(parentExceptionListener);
-                }
-                parentExceptionListener = null;
-            }
-        } catch (JMSException jmse) {
-            LOG.warn("Cannot set reconnect exception listener", jmse);
-        }
+    }
+
+    ExceptionListener getParentExceptionListener() {
+        return parentExceptionListener;
+    }
+
+    void setParentExceptionListener(ExceptionListener parentExceptionListener) {
+        this.parentExceptionListener = parentExceptionListener;
     }
 
     @Override
     public void onException(JMSException exception) {
-        close();
+        if (isReconnectOnException()) {
+            close();
+        }
         if (parentExceptionListener != null) {
             parentExceptionListener.onException(exception);
         }

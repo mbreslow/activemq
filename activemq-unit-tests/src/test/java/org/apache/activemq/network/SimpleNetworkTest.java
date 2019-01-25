@@ -16,15 +16,14 @@
  */
 package org.apache.activemq.network;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import java.net.URI;
 import java.util.Arrays;
 import java.util.concurrent.ConcurrentMap;
 
-import javax.jms.Connection;
 import javax.jms.DeliveryMode;
 import javax.jms.Destination;
 import javax.jms.JMSException;
@@ -32,45 +31,39 @@ import javax.jms.Message;
 import javax.jms.MessageConsumer;
 import javax.jms.MessageListener;
 import javax.jms.MessageProducer;
-import javax.jms.Session;
 import javax.jms.TextMessage;
 import javax.jms.TopicRequestor;
 import javax.jms.TopicSession;
 
 import org.apache.activemq.ActiveMQConnection;
-import org.apache.activemq.ActiveMQConnectionFactory;
 import org.apache.activemq.broker.BrokerService;
 import org.apache.activemq.command.ActiveMQDestination;
 import org.apache.activemq.command.ActiveMQMessage;
+import org.apache.activemq.command.ActiveMQQueue;
 import org.apache.activemq.command.ActiveMQTopic;
 import org.apache.activemq.command.ConsumerId;
 import org.apache.activemq.util.Wait;
-import org.apache.activemq.xbean.BrokerFactoryBean;
-import org.junit.After;
-import org.junit.Before;
+import org.apache.activemq.util.Wait.Condition;
 import org.junit.Ignore;
 import org.junit.Test;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.context.support.AbstractApplicationContext;
-import org.springframework.core.io.ClassPathResource;
-import org.springframework.core.io.Resource;
 
-public class SimpleNetworkTest {
+public class SimpleNetworkTest extends BaseNetworkTest {
 
     protected static final int MESSAGE_COUNT = 10;
-    private static final Logger LOG = LoggerFactory.getLogger(SimpleNetworkTest.class);
 
     protected AbstractApplicationContext context;
-    protected Connection localConnection;
-    protected Connection remoteConnection;
-    protected BrokerService localBroker;
-    protected BrokerService remoteBroker;
-    protected Session localSession;
-    protected Session remoteSession;
     protected ActiveMQTopic included;
     protected ActiveMQTopic excluded;
     protected String consumerName = "durableSubs";
+
+    @Override
+    protected void doSetUp(boolean deleteAllMessages) throws Exception {
+        super.doSetUp(deleteAllMessages);
+
+        included = new ActiveMQTopic("include.test.bar");
+        excluded = new ActiveMQTopic("exclude.test.bar");
+    }
 
     // works b/c of non marshaling vm transport, the connection
     // ref from the client is used during the forward
@@ -90,12 +83,14 @@ public class SimpleNetworkTest {
             Message test = localSession.createTextMessage("test-" + i);
             producer.send(test);
             Message msg = consumer1.receive(3000);
-            assertNotNull(msg);
+            assertNotNull("not null? message: " + i, msg);
             ActiveMQMessage amqMessage = (ActiveMQMessage) msg;
             assertTrue(amqMessage.isCompressed());
         }
         // ensure no more messages received
         assertNull(consumer1.receive(1000));
+
+        assertNetworkBridgeStatistics(MESSAGE_COUNT, 0);
     }
 
     @Test(timeout = 60 * 1000)
@@ -128,6 +123,8 @@ public class SimpleNetworkTest {
             assertNotNull(result);
             LOG.info(result.getText());
         }
+
+        assertNetworkBridgeStatistics(MESSAGE_COUNT, MESSAGE_COUNT);
     }
 
     @Test(timeout = 60 * 1000)
@@ -136,13 +133,15 @@ public class SimpleNetworkTest {
         MessageConsumer excludedConsumer = remoteSession.createConsumer(excluded);
         MessageProducer includedProducer = localSession.createProducer(included);
         MessageProducer excludedProducer = localSession.createProducer(excluded);
-        // allow for consumer infos to perculate arround
+        // allow for consumer infos to perculate around
         Thread.sleep(2000);
         Message test = localSession.createTextMessage("test");
         includedProducer.send(test);
         excludedProducer.send(test);
         assertNull(excludedConsumer.receive(1000));
         assertNotNull(includedConsumer.receive(1000));
+
+        assertNetworkBridgeStatistics(1, 0);
     }
 
     @Test(timeout = 60 * 1000)
@@ -163,6 +162,11 @@ public class SimpleNetworkTest {
         // ensure no more messages received
         assertNull(consumer1.receive(1000));
         assertNull(consumer2.receive(1000));
+
+        assertNetworkBridgeStatistics(MESSAGE_COUNT, 0);
+
+        assertNotNull(localBroker.getManagementContext().getObjectInstance(
+                localBroker.createNetworkConnectorObjectName(localBroker.getNetworkConnectors().get(0))));
     }
 
     private void waitForConsumerRegistration(final BrokerService brokerService, final int min, final ActiveMQDestination destination) throws Exception {
@@ -189,6 +193,101 @@ public class SimpleNetworkTest {
         }));
     }
 
+    //Added for AMQ-6465 to make sure memory usage decreased back to 0 after messages are forwarded
+    //to the other broker
+    @Test(timeout = 60 * 1000)
+    public void testDurableTopicSubForwardMemoryUsage() throws Exception {
+        // create a remote durable consumer to create demand
+        MessageConsumer remoteConsumer = remoteSession.createDurableSubscriber(included, consumerName);
+        Thread.sleep(1000);
+
+        MessageProducer producer = localSession.createProducer(included);
+        for (int i = 0; i < MESSAGE_COUNT; i++) {
+            Message test = localSession.createTextMessage("test-" + i);
+            producer.send(test);
+        }
+        Thread.sleep(1000);
+
+        //Make sure stats are set
+        assertEquals(MESSAGE_COUNT,
+                localBroker.getDestination(included).getDestinationStatistics().getForwards().getCount());
+
+        assertTrue(Wait.waitFor(new Condition() {
+
+            @Override
+            public boolean isSatisified() throws Exception {
+                return localBroker.getSystemUsage().getMemoryUsage().getUsage() == 0;
+            }
+        }, 10000, 500));
+        remoteConsumer.close();
+    }
+
+    //Added for AMQ-6465 to make sure memory usage decreased back to 0 after messages are forwarded
+    //to the other broker
+    @Test(timeout = 60 * 1000)
+    public void testTopicSubForwardMemoryUsage() throws Exception {
+        // create a remote durable consumer to create demand
+        MessageConsumer remoteConsumer = remoteSession.createConsumer(included);
+        Thread.sleep(1000);
+
+        MessageProducer producer = localSession.createProducer(included);
+        for (int i = 0; i < MESSAGE_COUNT; i++) {
+            Message test = localSession.createTextMessage("test-" + i);
+            producer.send(test);
+        }
+        Thread.sleep(1000);
+
+        //Make sure stats are set
+        assertEquals(MESSAGE_COUNT,
+                localBroker.getDestination(included).getDestinationStatistics().getForwards().getCount());
+
+        assertTrue(Wait.waitFor(new Condition() {
+
+            @Override
+            public boolean isSatisified() throws Exception {
+                return localBroker.getSystemUsage().getMemoryUsage().getUsage() == 0;
+            }
+        }, 10000, 500));
+
+        for (int i = 0; i < MESSAGE_COUNT; i++) {
+            assertNotNull("message count: " + i, remoteConsumer.receive(2500));
+        }
+        remoteConsumer.close();
+    }
+
+    //Added for AMQ-6465 to make sure memory usage decreased back to 0 after messages are forwarded
+    //to the other broker
+    @Test(timeout = 60 * 1000)
+    public void testQueueSubForwardMemoryUsage() throws Exception {
+        ActiveMQQueue queue = new ActiveMQQueue("include.test.foo");
+        MessageConsumer remoteConsumer = remoteSession.createConsumer(queue);
+        Thread.sleep(1000);
+
+        MessageProducer producer = localSession.createProducer(queue);
+        for (int i = 0; i < MESSAGE_COUNT; i++) {
+            Message test = localSession.createTextMessage("test-" + i);
+            producer.send(test);
+        }
+        Thread.sleep(1000);
+
+        //Make sure stats are set
+        assertEquals(MESSAGE_COUNT,
+                localBroker.getDestination(queue).getDestinationStatistics().getForwards().getCount());
+
+        assertTrue(Wait.waitFor(new Condition() {
+
+            @Override
+            public boolean isSatisified() throws Exception {
+                return localBroker.getSystemUsage().getMemoryUsage().getUsage() == 0;
+            }
+        }, 10000, 500));
+
+        for (int i = 0; i < MESSAGE_COUNT; i++) {
+            assertNotNull("message count: " + i, remoteConsumer.receive(2500));
+        }
+        remoteConsumer.close();
+    }
+
     @Test(timeout = 60 * 1000)
     public void testDurableStoreAndForward() throws Exception {
         // create a remote durable consumer
@@ -203,6 +302,11 @@ public class SimpleNetworkTest {
             producer.send(test);
         }
         Thread.sleep(1000);
+
+        //Make sure stats are set
+        assertEquals(MESSAGE_COUNT,
+                localBroker.getDestination(included).getDestinationStatistics().getForwards().getCount());
+
         // close everything down and restart
         doTearDown();
         doSetUp(false);
@@ -250,73 +354,19 @@ public class SimpleNetworkTest {
         }
     }
 
-    @Before
-    public void setUp() throws Exception {
-        doSetUp(true);
-    }
+    protected void assertNetworkBridgeStatistics(final long expectedLocalSent, final long expectedRemoteSent) throws Exception {
 
-    @After
-    public void tearDown() throws Exception {
-        doTearDown();
-    }
+        final NetworkBridge localBridge = localBroker.getNetworkConnectors().get(0).activeBridges().iterator().next();
+        final NetworkBridge remoteBridge = remoteBroker.getNetworkConnectors().get(0).activeBridges().iterator().next();
 
-    protected void doTearDown() throws Exception {
-        localConnection.close();
-        remoteConnection.close();
-        localBroker.stop();
-        remoteBroker.stop();
-    }
-
-    protected void doSetUp(boolean deleteAllMessages) throws Exception {
-        remoteBroker = createRemoteBroker();
-        remoteBroker.setDeleteAllMessagesOnStartup(deleteAllMessages);
-        remoteBroker.start();
-        remoteBroker.waitUntilStarted();
-        localBroker = createLocalBroker();
-        localBroker.setDeleteAllMessagesOnStartup(deleteAllMessages);
-        localBroker.start();
-        localBroker.waitUntilStarted();
-        URI localURI = localBroker.getVmConnectorURI();
-        ActiveMQConnectionFactory fac = new ActiveMQConnectionFactory(localURI);
-        fac.setAlwaysSyncSend(true);
-        fac.setDispatchAsync(false);
-        localConnection = fac.createConnection();
-        localConnection.setClientID("clientId");
-        localConnection.start();
-        URI remoteURI = remoteBroker.getVmConnectorURI();
-        fac = new ActiveMQConnectionFactory(remoteURI);
-        remoteConnection = fac.createConnection();
-        remoteConnection.setClientID("clientId");
-        remoteConnection.start();
-        included = new ActiveMQTopic("include.test.bar");
-        excluded = new ActiveMQTopic("exclude.test.bar");
-        localSession = localConnection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-        remoteSession = remoteConnection.createSession(false, Session.AUTO_ACKNOWLEDGE);
-    }
-
-    protected String getRemoteBrokerURI() {
-        return "org/apache/activemq/network/remoteBroker.xml";
-    }
-
-    protected String getLocalBrokerURI() {
-        return "org/apache/activemq/network/localBroker.xml";
-    }
-
-    protected BrokerService createBroker(String uri) throws Exception {
-        Resource resource = new ClassPathResource(uri);
-        BrokerFactoryBean factory = new BrokerFactoryBean(resource);
-        resource = new ClassPathResource(uri);
-        factory = new BrokerFactoryBean(resource);
-        factory.afterPropertiesSet();
-        BrokerService result = factory.getBroker();
-        return result;
-    }
-
-    protected BrokerService createLocalBroker() throws Exception {
-        return createBroker(getLocalBrokerURI());
-    }
-
-    protected BrokerService createRemoteBroker() throws Exception {
-        return createBroker(getRemoteBrokerURI());
+        assertTrue(Wait.waitFor(new Wait.Condition() {
+            @Override
+            public boolean isSatisified() throws Exception {
+                return expectedLocalSent == localBridge.getNetworkBridgeStatistics().getDequeues().getCount() &&
+                       0 == localBridge.getNetworkBridgeStatistics().getReceivedCount().getCount() &&
+                       expectedRemoteSent == remoteBridge.getNetworkBridgeStatistics().getDequeues().getCount() &&
+                       0 == remoteBridge.getNetworkBridgeStatistics().getReceivedCount().getCount();
+            }
+        }));
     }
 }

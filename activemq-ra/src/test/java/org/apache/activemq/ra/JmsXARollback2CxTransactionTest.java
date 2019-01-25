@@ -19,6 +19,7 @@ package org.apache.activemq.ra;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.net.URI;
 
 import javax.jms.Connection;
 import javax.jms.ConnectionFactory;
@@ -32,6 +33,8 @@ import org.apache.activemq.ActiveMQConnection;
 import org.apache.activemq.ActiveMQConnectionFactory;
 import org.apache.activemq.ActiveMQPrefetchPolicy;
 import org.apache.activemq.JmsQueueTransactionTest;
+import org.apache.activemq.broker.BrokerFactory;
+import org.apache.activemq.broker.BrokerService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,8 +42,9 @@ public class JmsXARollback2CxTransactionTest extends JmsQueueTransactionTest {
 
     protected static final Logger LOG = LoggerFactory.getLogger(JmsXARollback2CxTransactionTest.class);
 
-    private static final String DEFAULT_HOST = "vm://localhost?create=false";
+    private static final String DEFAULT_HOST = "vm://localhost?create=false&waitForStart=5000";
 
+    private ManagedConnectionProxy cx2;
     private ConnectionManagerAdapter connectionManager = new ConnectionManagerAdapter();
     private static long txGenerator;
     private Xid xid;
@@ -48,9 +52,23 @@ public class JmsXARollback2CxTransactionTest extends JmsQueueTransactionTest {
     private int index = 0;
 
     @Override
+    protected BrokerService createBroker() throws Exception {
+        return BrokerFactory.createBroker(new URI("broker://()/localhost?persistent=false&useJmx=false"));
+    }
+
+    @Override
     protected void setUp() throws Exception {
         LOG.info("Starting ----------------------------> {}", this.getName());
         super.setUp();
+    }
+
+    @Override
+    protected void tearDown() throws Exception {
+        if (cx2 != null) {
+            cx2.close();
+        }
+
+        super.tearDown();
     }
 
     @Override
@@ -90,7 +108,7 @@ public class JmsXARollback2CxTransactionTest extends JmsQueueTransactionTest {
     protected void reconnect() throws Exception {
         super.reconnect();
         xares[0] = getXAResource(connection);
-        ManagedConnectionProxy cx2 = (ManagedConnectionProxy) connectionFactory.createConnection();
+        cx2 = (ManagedConnectionProxy) connectionFactory.createConnection();
         xares[1] = getXAResource(cx2);
     }
 

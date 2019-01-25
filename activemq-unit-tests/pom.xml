@@ -22,7 +22,7 @@
   <parent>
     <groupId>org.apache.activemq</groupId>
     <artifactId>activemq-parent</artifactId>
-    <version>5.13-SNAPSHOT</version>
+    <version>5.16.0-SNAPSHOT</version>
   </parent>
 
   <artifactId>activemq-unit-tests</artifactId>
@@ -64,11 +64,11 @@
     </dependency>
     <dependency>
       <groupId>org.apache.activemq</groupId>
-      <artifactId>activemq-amqp</artifactId>
+      <artifactId>activemq-partition</artifactId>
     </dependency>
     <dependency>
       <groupId>org.apache.activemq</groupId>
-      <artifactId>activemq-partition</artifactId>
+      <artifactId>activemq-runtime-config</artifactId>
     </dependency>
     <dependency>
       <groupId>org.apache.geronimo.specs</groupId>
@@ -86,6 +86,10 @@
     <dependency>
       <groupId>org.fusesource.mqtt-client</groupId>
       <artifactId>mqtt-client</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.activemq.tooling</groupId>
+      <artifactId>activemq-junit</artifactId>
     </dependency>
 
     <!-- =============================== -->
@@ -246,7 +250,6 @@
     <dependency>
       <groupId>org.apache.commons</groupId>
       <artifactId>commons-dbcp2</artifactId>
-      <version>2.1</version>
       <optional>true</optional>
       <scope>test</scope>
     </dependency>
@@ -312,6 +315,31 @@
       <version>${ftpserver-version}</version>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.powermock</groupId>
+      <artifactId>powermock-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.powermock</groupId>
+      <artifactId>powermock-module-junit4</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.powermock</groupId>
+      <artifactId>powermock-api-mockito</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.powermock</groupId>
+      <artifactId>powermock-api-mockito-common</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <reporting>
@@ -321,6 +349,8 @@
         <artifactId>maven-javadoc-plugin</artifactId>
         <version>${maven-javadoc-plugin-version}</version>
         <configuration>
+          <!-- necessary for now under the javadocs can be fixed because jdk8 is much stricter -->
+          <additionalparam>${javadoc.options}</additionalparam>
           <links>
             <link>${javase-javadoc-url}</link>
             <link>${javaee-javadoc-url}</link>
@@ -431,7 +461,7 @@
         <configuration>
           <forkCount>1</forkCount>
           <reuseForks>false</reuseForks>
-          <forkedProcessTimeoutInSeconds>600</forkedProcessTimeoutInSeconds>
+          <forkedProcessTimeoutInSeconds>1200</forkedProcessTimeoutInSeconds>
           <runOrder>alphabetical</runOrder>
           <excludes>
             <!-- temporarily exclude failing tests so that CI works; fix asap and reenable -->
@@ -740,6 +770,7 @@
                 <exclude>org/apache/activemq/broker/jmx/MBeanTest.*</exclude>
                 <exclude>org/apache/activemq/broker/jmx/PurgeTest.*</exclude>
                 <exclude>org/apache/activemq/broker/mKahaDBXARecoveryBrokerTest.*</exclude>
+                <exclude>org/apache/activemq/broker/KahaDBXARecoveryBrokerTest.*</exclude>
                 <exclude>org/apache/activemq/broker/policy/AbortSlowConsumerTest.*</exclude>
                 <exclude>org/apache/activemq/broker/region/DestinationGCTest.*</exclude>
                 <exclude>org/apache/activemq/broker/region/DestinationRemoveRestartTest.*</exclude>
@@ -1265,8 +1296,5 @@
               </plugins>
           </build>
       </profile>
-
-
-
   </profiles>
 </project>

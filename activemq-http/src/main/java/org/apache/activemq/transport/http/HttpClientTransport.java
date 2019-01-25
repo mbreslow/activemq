@@ -20,6 +20,7 @@ import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.net.URI;
+import java.security.cert.X509Certificate;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
@@ -30,6 +31,7 @@ import org.apache.activemq.util.ByteArrayOutputStream;
 import org.apache.activemq.util.IOExceptionSupport;
 import org.apache.activemq.util.IdGenerator;
 import org.apache.activemq.util.ServiceStopper;
+import org.apache.activemq.wireformat.WireFormat;
 import org.apache.http.Header;
 import org.apache.http.HttpHost;
 import org.apache.http.HttpRequest;
@@ -45,6 +47,8 @@ import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpHead;
 import org.apache.http.client.methods.HttpOptions;
 import org.apache.http.client.methods.HttpPost;
+import org.apache.http.client.params.CookiePolicy;
+import org.apache.http.client.params.HttpClientParams;
 import org.apache.http.conn.ClientConnectionManager;
 import org.apache.http.conn.params.ConnRoutePNames;
 import org.apache.http.conn.scheme.PlainSocketFactory;
@@ -122,8 +126,6 @@ public class HttpClientTransport extends HttpTransportSupport {
         HttpResponse answer = null;
         try {
             client = getSendHttpClient();
-            HttpParams params = client.getParams();
-            HttpConnectionParams.setSoTimeout(params, soTimeout);
             answer = client.execute(httpMethod);
             int status = answer.getStatusLine().getStatusCode();
             if (status != HttpStatus.SC_OK) {
@@ -184,6 +186,7 @@ public class HttpClientTransport extends HttpTransportSupport {
                             Thread.sleep(1000);
                         } catch (InterruptedException e) {
                             onException(new InterruptedIOException());
+                            Thread.currentThread().interrupt();
                             break;
                         }
                     } else {
@@ -278,6 +281,7 @@ public class HttpClientTransport extends HttpTransportSupport {
             httpClient.execute(httpMethod, new BasicResponseHandler());
             httpClient.execute(optionsMethod, handler);
         } catch(Exception e) {
+            LOG.trace("Error on start: ", e);
             throw new IOException("Failed to perform GET on: " + remoteUrl + " as response was: " + e.getMessage());
         }
 
@@ -338,6 +342,11 @@ public class HttpClientTransport extends HttpTransportSupport {
                     new UsernamePasswordCredentials(getProxyUser(), getProxyPassword()));
             }
         }
+
+        HttpParams params = client.getParams();
+        HttpConnectionParams.setSoTimeout(params, soTimeout);
+        HttpClientParams.setCookiePolicy(params, CookiePolicy.BROWSER_COMPATIBILITY);
+
         return client;
     }
 
@@ -395,4 +404,17 @@ public class HttpClientTransport extends HttpTransportSupport {
         this.minSendAsCompressedSize = minSendAsCompressedSize;
     }
 
+    @Override
+    public X509Certificate[] getPeerCertificates() {
+        return null;
+    }
+
+    @Override
+    public void setPeerCertificates(X509Certificate[] certificates) {
+    }
+
+    @Override
+    public WireFormat getWireFormat() {
+        return getTextWireFormat();
+    }
 }

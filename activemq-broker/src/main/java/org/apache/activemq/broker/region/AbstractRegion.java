@@ -159,10 +159,10 @@ public abstract class AbstractRegion implements Region {
                         dest = destinationInterceptor.intercept(dest);
                     }
                     dest.start();
+                    addSubscriptionsForDestination(context, dest);
                     destinations.put(destination, dest);
                     updateRegionDestCounts(destination, 1);
-                    destinationMap.put(destination, dest);
-                    addSubscriptionsForDestination(context, dest);
+                    destinationMap.unsynchronizedPut(destination, dest);
                 }
                 if (dest == null) {
                     throw new DestinationDoesNotExistException(destination.getQualifiedName());
@@ -217,7 +217,7 @@ public abstract class AbstractRegion implements Region {
                 // If a destination isn't specified, then just count up
                 // non-advisory destinations (ie count all destinations)
                 int destinationSize = (int) (entry.getDestination() != null ?
-                        destinationMap.get(entry.getDestination()).size() : regionStatistics.getDestinations().getCount());
+                        destinationMap.unsynchronizedGet(entry.getDestination()).size() : regionStatistics.getDestinations().getCount());
                 if (destinationSize >= entry.getMaxDestinations()) {
                     if (entry.getDestination() != null) {
                         throw new IllegalStateException(
@@ -266,7 +266,7 @@ public abstract class AbstractRegion implements Region {
         if (timeout == 0) {
             for (Iterator<Subscription> iter = subscriptions.values().iterator(); iter.hasNext();) {
                 Subscription sub = iter.next();
-                if (sub.matches(destination)) {
+                if (sub.matches(destination) ) {
                     throw new JMSException("Destination still has an active subscription: " + destination);
                 }
             }
@@ -296,7 +296,10 @@ public abstract class AbstractRegion implements Region {
                         dest.removeSubscription(context, sub, 0l);
                     }
                 }
-                destinationMap.remove(destination, dest);
+                destinationMap.unsynchronizedRemove(destination, dest);
+                if (dest instanceof Queue){
+                    ((Queue) dest).purge();
+                }
                 dispose(context, dest);
                 DestinationInterceptor destinationInterceptor = broker.getDestinationInterceptor();
                 if (destinationInterceptor != null) {
@@ -321,7 +324,7 @@ public abstract class AbstractRegion implements Region {
     public Set<Destination> getDestinations(ActiveMQDestination destination) {
         destinationsLock.readLock().lock();
         try{
-            return destinationMap.get(destination);
+            return destinationMap.unsynchronizedGet(destination);
         } finally {
             destinationsLock.readLock().unlock();
         }
@@ -387,9 +390,11 @@ public abstract class AbstractRegion implements Region {
             List<Destination> addList = new ArrayList<Destination>();
             destinationsLock.readLock().lock();
             try {
-                for (Destination dest : (Set<Destination>) destinationMap.get(info.getDestination())) {
+                for (Destination dest : (Set<Destination>) destinationMap.unsynchronizedGet(info.getDestination())) {
                     addList.add(dest);
                 }
+                // ensure sub visible to any new dest addSubscriptionsForDestination
+                subscriptions.put(info.getConsumerId(), sub);
             } finally {
                 destinationsLock.readLock().unlock();
             }
@@ -412,6 +417,8 @@ public abstract class AbstractRegion implements Region {
                                 LOG.error("Error unsubscribing " + sub + " from " + remove + ": " + ex.getMessage(), ex);
                             }
                         }
+                        subscriptions.remove(info.getConsumerId());
+                        removeList.clear();
                         throw e;
                     }
                 }
@@ -421,8 +428,6 @@ public abstract class AbstractRegion implements Region {
             if (info.isBrowser()) {
                 ((QueueBrowserSubscription) sub).destinationsAdded();
             }
-
-            subscriptions.put(info.getConsumerId(), sub);
 
             return sub;
         }
@@ -465,7 +470,7 @@ public abstract class AbstractRegion implements Region {
             List<Destination> removeList = new ArrayList<Destination>();
             destinationsLock.readLock().lock();
             try {
-                for (Destination dest : (Set<Destination>) destinationMap.get(info.getDestination())) {
+                for (Destination dest : (Set<Destination>) destinationMap.unsynchronizedGet(info.getDestination())) {
                     removeList.add(dest);
                 }
             } finally {
@@ -550,15 +555,7 @@ public abstract class AbstractRegion implements Region {
                 // Try to auto create the destination... re-invoke broker
                 // from the
                 // top so that the proper security checks are performed.
-                context.getBroker().addDestination(context, destination, createTemporary);
-                dest = addDestination(context, destination, false);
-                // We should now have the dest created.
-                destinationsLock.readLock().lock();
-                try {
-                    dest = destinations.get(destination);
-                } finally {
-                    destinationsLock.readLock().unlock();
-                }
+                dest = context.getBroker().addDestination(context, destination, createTemporary);
             }
 
             if (dest == null) {
@@ -642,7 +639,7 @@ public abstract class AbstractRegion implements Region {
     public void addProducer(ConnectionContext context, ProducerInfo info) throws Exception {
         destinationsLock.readLock().lock();
         try {
-            for (Destination dest : (Set<Destination>) destinationMap.get(info.getDestination())) {
+            for (Destination dest : (Set<Destination>) destinationMap.unsynchronizedGet(info.getDestination())) {
                 dest.addProducer(context, info);
             }
         } finally {
@@ -663,7 +660,7 @@ public abstract class AbstractRegion implements Region {
     public void removeProducer(ConnectionContext context, ProducerInfo info) throws Exception {
         destinationsLock.readLock().lock();
         try {
-            for (Destination dest : (Set<Destination>) destinationMap.get(info.getDestination())) {
+            for (Destination dest : (Set<Destination>) destinationMap.unsynchronizedGet(info.getDestination())) {
                 dest.removeProducer(context, info);
             }
         } finally {
@@ -688,7 +685,7 @@ public abstract class AbstractRegion implements Region {
                     entry.configurePrefetch(sub);
                 }
             }
-            LOG.debug("setting prefetch: {}, on subscription: {}; resulting value: {}", new Object[]{ control.getPrefetch(), control.getConsumerId(), sub.getConsumerInfo().getCurrentPrefetchSize()});
+            LOG.debug("setting prefetch: {}, on subscription: {}; resulting value: {}", new Object[]{ control.getPrefetch(), control.getConsumerId(), sub.getConsumerInfo().getPrefetchSize()});
             try {
                 lookup(consumerExchange.getConnectionContext(), control.getDestination(),false).wakeup();
             } catch (Exception e) {

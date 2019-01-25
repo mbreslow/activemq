@@ -26,12 +26,13 @@ import org.apache.activemq.transport.WebTransportServerSupport;
 import org.apache.activemq.transport.util.TextWireFormat;
 import org.apache.activemq.transport.xstream.XStreamWireFormat;
 import org.apache.activemq.util.ServiceStopper;
+import org.eclipse.jetty.security.ConstraintSecurityHandler;
 import org.eclipse.jetty.server.Connector;
 import org.eclipse.jetty.server.Handler;
 import org.eclipse.jetty.server.Server;
+import org.eclipse.jetty.server.handler.HandlerWrapper;
 import org.eclipse.jetty.servlet.ServletContextHandler;
 import org.eclipse.jetty.servlet.ServletHolder;
-import org.eclipse.jetty.servlets.gzip.GzipHandler;
 
 public class HttpTransportServer extends WebTransportServerSupport {
 
@@ -82,7 +83,7 @@ public class HttpTransportServer extends WebTransportServerSupport {
         URI boundTo = bind();
 
         ServletContextHandler contextHandler =
-            new ServletContextHandler(server, "/", ServletContextHandler.NO_SECURITY);
+            new ServletContextHandler(server, "/", ServletContextHandler.SECURITY);
 
         ServletHolder holder = new ServletHolder();
         holder.setServlet(new HttpTunnelServlet());
@@ -92,6 +93,10 @@ public class HttpTransportServer extends WebTransportServerSupport {
         contextHandler.setAttribute("wireFormat", getWireFormat());
         contextHandler.setAttribute("transportFactory", transportFactory);
         contextHandler.setAttribute("transportOptions", transportOptions);
+
+        //AMQ-6182 - disabling trace by default
+        configureTraceMethod((ConstraintSecurityHandler) contextHandler.getSecurityHandler(),
+                httpOptions.isEnableTrace());
 
         addGzipHandler(contextHandler);
 
@@ -118,9 +123,32 @@ public class HttpTransportServer extends WebTransportServerSupport {
     private int getConnectorLocalPort() throws Exception {
         return (Integer)connector.getClass().getMethod("getLocalPort").invoke(connector);
     }
+
     private void addGzipHandler(ServletContextHandler contextHandler) throws Exception {
-        Handler handler = new GzipHandler();
-        contextHandler.setHandler(handler);
+        HandlerWrapper handler = null;
+        try {
+            handler = (HandlerWrapper) forName("org.eclipse.jetty.servlets.gzip.GzipHandler").newInstance();
+        } catch (Throwable t) {
+            handler = (HandlerWrapper) forName("org.eclipse.jetty.server.handler.gzip.GzipHandler").newInstance();
+        }
+        contextHandler.insertHandler(handler);
+    }
+
+    private Class<?> forName(String name) throws ClassNotFoundException {
+        Class<?> clazz = null;
+        ClassLoader loader = Thread.currentThread().getContextClassLoader();
+        if (loader != null) {
+            try {
+                clazz = loader.loadClass(name);
+            } catch (ClassNotFoundException e) {
+                // ignore
+            }
+        }
+        if (clazz == null) {
+            clazz = HttpTransportServer.class.getClassLoader().loadClass(name);
+        }
+
+        return clazz;
     }
 
     @Override

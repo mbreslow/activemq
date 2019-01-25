@@ -19,6 +19,7 @@ package org.apache.activemq.transport.vm;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.net.URI;
+import java.security.cert.X509Certificate;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -34,6 +35,8 @@ import org.apache.activemq.transport.ResponseCallback;
 import org.apache.activemq.transport.Transport;
 import org.apache.activemq.transport.TransportDisposedIOException;
 import org.apache.activemq.transport.TransportListener;
+import org.apache.activemq.util.IOExceptionSupport;
+import org.apache.activemq.wireformat.WireFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -122,6 +125,7 @@ public class VMTransport implements Transport, Task {
                 }
             }
         } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             InterruptedIOException iioe = new InterruptedIOException(e.getMessage());
             iioe.initCause(e);
             throw iioe;
@@ -267,7 +271,14 @@ public class VMTransport implements Transport, Task {
 
         Object command = mq.poll();
         if (command != null && !disposed.get()) {
-            tl.onCommand(command);
+            try {
+                tl.onCommand(command);
+            } catch (Exception e) {
+                try {
+                    peer.transportListener.onException(IOExceptionSupport.create(e));
+                } catch (Exception ignore) {
+                }
+            }
             return !mq.isEmpty() && !disposed.get();
         } else {
             if(disposed.get()) {
@@ -436,5 +447,20 @@ public class VMTransport implements Transport, Task {
     @Override
     public int getReceiveCounter() {
         return receiveCounter;
+    }
+
+    @Override
+    public X509Certificate[] getPeerCertificates() {
+        return null;
+    }
+
+    @Override
+    public void setPeerCertificates(X509Certificate[] certificates) {
+
+    }
+
+    @Override
+    public WireFormat getWireFormat() {
+        return null;
     }
 }

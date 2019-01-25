@@ -34,6 +34,14 @@ import org.apache.activemq.store.kahadb.MultiKahaDBPersistenceAdapter;
 public class MultiKahaDBPendingMessageCursorTest extends
     KahaDBPendingMessageCursorTest {
 
+    /**
+     * @param prioritizedMessages
+     */
+    public MultiKahaDBPendingMessageCursorTest(final boolean prioritizedMessages,
+            final boolean enableSubscriptionStatistics) {
+        super(prioritizedMessages, enableSubscriptionStatistics);
+    }
+
     @Override
     protected void initPersistence(BrokerService brokerService)
             throws IOException {
@@ -45,6 +53,7 @@ public class MultiKahaDBPendingMessageCursorTest extends
 
         KahaDBPersistenceAdapter kahaStore = new KahaDBPersistenceAdapter();
         kahaStore.setJournalMaxFileLength(1024 * 512);
+        kahaStore.setEnableSubscriptionStatistics(enableSubscriptionStatistics);
 
         //set up a store per destination
         FilteredKahaDBPersistenceAdapter filtered = new FilteredKahaDBPersistenceAdapter();

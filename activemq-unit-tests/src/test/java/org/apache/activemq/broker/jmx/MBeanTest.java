@@ -26,7 +26,18 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import javax.jms.*;
+import javax.jms.BytesMessage;
+import javax.jms.Connection;
+import javax.jms.ConnectionFactory;
+import javax.jms.Destination;
+import javax.jms.JMSException;
+import javax.jms.Message;
+import javax.jms.MessageConsumer;
+import javax.jms.MessageListener;
+import javax.jms.MessageProducer;
+import javax.jms.Session;
+import javax.jms.Topic;
+import javax.jms.TopicSubscriber;
 import javax.management.MBeanServer;
 import javax.management.MBeanServerInvocationHandler;
 import javax.management.MalformedObjectNameException;
@@ -43,6 +54,7 @@ import org.apache.activemq.ActiveMQPrefetchPolicy;
 import org.apache.activemq.ActiveMQSession;
 import org.apache.activemq.BlobMessage;
 import org.apache.activemq.EmbeddedBrokerTestSupport;
+import org.apache.activemq.RedeliveryPolicy;
 import org.apache.activemq.broker.BrokerService;
 import org.apache.activemq.broker.region.BaseDestination;
 import org.apache.activemq.broker.region.policy.PolicyEntry;
@@ -51,11 +63,9 @@ import org.apache.activemq.broker.region.policy.SharedDeadLetterStrategy;
 import org.apache.activemq.command.ActiveMQDestination;
 import org.apache.activemq.command.ActiveMQQueue;
 import org.apache.activemq.command.ActiveMQTempQueue;
-import org.apache.activemq.memory.list.MessageList;
 import org.apache.activemq.util.JMXSupport;
 import org.apache.activemq.util.URISupport;
 import org.apache.activemq.util.Wait;
-import org.junit.Ignore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -65,6 +75,7 @@ import org.slf4j.LoggerFactory;
  * command line application.
  */
 public class MBeanTest extends EmbeddedBrokerTestSupport {
+
     private static final Logger LOG = LoggerFactory.getLogger(MBeanTest.class);
 
     private static boolean waitForKeyPress;
@@ -170,8 +181,58 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
         assertEquals("no forwards", 0, queueNew.getForwardCount());
     }
 
+    public void testMoveFromDLQImmediateDLQ() throws Exception {
+
+        RedeliveryPolicy redeliveryPolicy = new RedeliveryPolicy();
+        redeliveryPolicy.setMaximumRedeliveries(0);
+        ((ActiveMQConnectionFactory)connectionFactory).setRedeliveryPolicy(redeliveryPolicy);
+        Connection connection = connectionFactory.createConnection();
+
+        // populate
+        useConnection(connection);
+
+        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+        Destination dest = session.createQueue(getDestinationString());
+        MessageConsumer consumer = session.createConsumer(dest);
+        consumer.setMessageListener(new MessageListener() {
+            @Override
+            public void onMessage(Message message) {
+                try {
+                    System.out.println("Received: " + message + " on " + message.getJMSDestination());
+                } catch (JMSException e) {
+                    e.printStackTrace();
+                }
+                throw new RuntimeException("Horrible exception");
+            }});
+
+
+        ObjectName queueViewMBeanName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + getDestinationString());
+        QueueViewMBean queue = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, queueViewMBeanName, QueueViewMBean.class, true);
+
+        ObjectName dlqQueueViewMBeanName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + SharedDeadLetterStrategy.DEFAULT_DEAD_LETTER_QUEUE_NAME );
+        QueueViewMBean dlq = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, dlqQueueViewMBeanName, QueueViewMBean.class, true);
+
+        assertTrue("messages on dlq", Wait.waitFor(new Wait.Condition() {
+            @Override
+            public boolean isSatisified() throws Exception {
+                LOG.info("Dlq size: " + dlq.getQueueSize() + ", qSize: " + queue.getQueueSize());
+                return MESSAGE_COUNT == dlq.getQueueSize();
+            }
+        }));
+
+        dlq.retryMessages();
+
+        assertTrue("messages on dlq after retry", Wait.waitFor(new Wait.Condition() {
+            @Override
+            public boolean isSatisified() throws Exception {
+                LOG.info("Dlq size: " + dlq.getQueueSize() + ", qSize: " + queue.getQueueSize());
+                return MESSAGE_COUNT == dlq.getQueueSize();
+            }
+        }));
+    }
+
     //Show broken behaviour https://issues.apache.org/jira/browse/AMQ-5752"
-    // points to the need to except on a duplicate or have store.addMessage return bool
+    // points to the need to except on a duplicate or have store.addMessage return boolean
     // need some thought on how best to resolve this
     public void Broken_testMoveDuplicateDoesNotDelete() throws Exception {
         connection = connectionFactory.createConnection();
@@ -211,6 +272,33 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
 
         compdatalist = queue.browse();
         actualCount = compdatalist.length;
+        echo("Current queue size: " + actualCount);
+        assertEquals("no change", initialQueueSize, actualCount);
+    }
+
+    public void testMoveCopyToSameDestFails() throws Exception {
+        connection = connectionFactory.createConnection();
+        useConnection(connection);
+
+        ObjectName queueViewMBeanName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + getDestinationString());
+
+        QueueViewMBean queue = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, queueViewMBeanName, QueueViewMBean.class, true);
+
+        CompositeData[] compdatalist = queue.browse();
+        int initialQueueSize = compdatalist.length;
+        CompositeData cdata = compdatalist[0];
+        String messageID = (String) cdata.get("JMSMessageID");
+
+        assertFalse("fail to copy to self", queue.copyMessageTo(messageID, getDestinationString()));
+        assertEquals("fail to copy to self", 0, queue.copyMatchingMessagesTo("", getDestinationString()));
+        assertEquals("fail to copy x to self", 0, queue.copyMatchingMessagesTo("", getDestinationString(), initialQueueSize));
+
+        assertFalse("fail to move to self", queue.moveMessageTo(messageID, getDestinationString()));
+        assertEquals("fail to move to self", 0, queue.moveMatchingMessagesTo("", getDestinationString()));
+        assertEquals("fail to move x to self", 0, queue.moveMatchingMessagesTo("", getDestinationString(), initialQueueSize));
+
+        compdatalist = queue.browse();
+        int actualCount = compdatalist.length;
         echo("Current queue size: " + actualCount);
         assertEquals("no change", initialQueueSize, actualCount);
     }
@@ -364,15 +452,19 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
 
         queueViewMBeanName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + newDestination);
 
-        queue = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, queueViewMBeanName, QueueViewMBean.class, true);
+        QueueViewMBean queueNew = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, queueViewMBeanName, QueueViewMBean.class, true);
         int movedSize = MESSAGE_COUNT-3;
-        assertEquals("Unexpected number of messages ",movedSize,queue.getQueueSize());
+        assertEquals("Unexpected number of messages ",movedSize,queueNew.getQueueSize());
 
         // now lets remove them by selector
-        queue.removeMatchingMessages("counter > 2");
+        queueNew.removeMatchingMessages("counter > 2");
 
-        assertEquals("Should have no more messages in the queue: " + queueViewMBeanName, 0, queue.getQueueSize());
-        assertEquals("dest has no memory usage", 0, queue.getMemoryPercentUsage());
+        assertEquals("Should have no more messages in the queue: " + queueViewMBeanName, 0, queueNew.getQueueSize());
+        assertEquals("dest has no memory usage", 0, queueNew.getMemoryPercentUsage());
+        assertEquals("dest has 0 memory usage", 0, queueNew.getMemoryUsageByteCount());
+
+        queue.purge();
+        assertEquals("dest has 0 memory usage", 0, queue.getMemoryUsageByteCount());
     }
 
     public void testCopyMessagesBySelector() throws Exception {
@@ -390,15 +482,84 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
 
         queueViewMBeanName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + newDestination);
 
-        queue = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, queueViewMBeanName, QueueViewMBean.class, true);
+        QueueViewMBean queueTwo = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, queueViewMBeanName, QueueViewMBean.class, true);
 
-        LOG.info("Queue: " + queueViewMBeanName + " now has: " + queue.getQueueSize() + " message(s)");
-        assertEquals("Expected messages in a queue: " + queueViewMBeanName, MESSAGE_COUNT-3, queue.getQueueSize());
+        LOG.info("Queue: " + queueViewMBeanName + " now has: " + queueTwo.getQueueSize() + " message(s)");
+        assertEquals("Expected messages in a queue: " + queueViewMBeanName, MESSAGE_COUNT-3, queueTwo.getQueueSize());
         // now lets remove them by selector
-        queue.removeMatchingMessages("counter > 2");
+        queueTwo.removeMatchingMessages("counter > 2");
 
-        assertEquals("Should have no more messages in the queue: " + queueViewMBeanName, 0, queue.getQueueSize());
-        assertEquals("dest has no memory usage", 0, queue.getMemoryPercentUsage());
+        assertEquals("Should have no more messages in the queue: " + queueViewMBeanName, 0, queueTwo.getQueueSize());
+        assertEquals("dest has no memory usage", 0, queueTwo.getMemoryPercentUsage());
+        assertEquals("dest has 0 memory usage", 0, queueTwo.getMemoryUsageByteCount());
+
+        queue.purge();
+        assertEquals("dest has 0 memory usage", 0, queue.getMemoryUsageByteCount());
+    }
+
+    public void testSelectorBrowseUsage() throws Exception {
+        connection = connectionFactory.createConnection();
+        useConnection(connection);
+
+        ObjectName queueViewMBeanName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + getDestinationString());
+
+        final String someSelectorExp = "JMSType = '22'";
+        QueueViewMBean queue = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, queueViewMBeanName, QueueViewMBean.class, true);
+        queue.browse(someSelectorExp);
+        queue.purge();
+        assertEquals("dest has 0 memory usage", 0, queue.getMemoryUsageByteCount());
+
+        connection.close();
+        connection = connectionFactory.createConnection();
+        useConnection(connection);
+        queue.browseMessages(someSelectorExp);
+        queue.purge();
+        assertEquals("dest has 0 memory usage", 0, queue.getMemoryUsageByteCount());
+
+        connection.close();
+        connection = connectionFactory.createConnection();
+        useConnection(connection);
+        queue.browseAsTable(someSelectorExp);
+        queue.purge();
+        assertEquals("dest has 0 memory usage", 0, queue.getMemoryUsageByteCount());
+    }
+
+    public void testCopyPurgeCopyBack() throws Exception {
+        connection = connectionFactory.createConnection();
+        final int numMessages = 100;
+        useConnection(connection, numMessages);
+
+        ObjectName queueViewMBeanName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + getDestinationString());
+
+        QueueViewMBean queueT = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, queueViewMBeanName, QueueViewMBean.class, true);
+
+        String newDestination = getSecondDestinationString();
+        long queueSize = queueT.getQueueSize();
+        assertTrue(queueSize > 0);
+
+        int c = queueT.copyMatchingMessagesTo(null, newDestination);
+        LOG.info("Copied: " + c);
+
+        queueViewMBeanName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + newDestination);
+
+        QueueViewMBean queueD = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, queueViewMBeanName, QueueViewMBean.class, true);
+
+        LOG.info("Queue: " + queueD.getName() + " now has: " + queueD.getQueueSize() + " message(s)");
+        assertEquals("Expected messages in a queue: " + queueD.getQueueSize(), numMessages, queueD.getQueueSize());
+
+        LOG.info("Queue: " + queueT.getName() + " now has: " + queueT.getQueueSize() + " message(s)");
+        assertEquals("Expected messages in a queue: " + queueT.getQueueSize(), numMessages, queueT.getQueueSize());
+
+        queueT.purge();
+        queueD.copyMatchingMessagesTo(null, getDestinationString());
+
+        LOG.info("Queue: " + queueD.getName() + " now has: " + queueD.getQueueSize() + " message(s)");
+        assertEquals("Expected messages in a queue: " + queueD.getQueueSize(), numMessages, queueD.getQueueSize());
+
+        LOG.info("Queue: " + queueT.getName() + " now has: " + queueT.getQueueSize() + " message(s)");
+        assertEquals("Expected messages in a queue: " + queueT.getQueueSize(), numMessages, queueT.getQueueSize());
+
+        assertNotRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + SharedDeadLetterStrategy.DEFAULT_DEAD_LETTER_QUEUE_NAME );
     }
 
     public void testCreateDestinationWithSpacesAtEnds() throws Exception {
@@ -810,6 +971,8 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
         super.setUp();
         ManagementContext managementContext = broker.getManagementContext();
         mbeanServer = managementContext.getMBeanServer();
+
+        broker.getTransportConnectorByScheme("tcp").setUpdateClusterClientsOnRemove(true);
     }
 
     @Override
@@ -1437,7 +1600,8 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
             String messageID = (String) cdata.get("JMSMessageID");
             assertNotNull("Should have a message ID for message " + i, messageID);
 
-            Map intProperties = CompositeDataHelper.getTabularMap(cdata, CompositeDataConstants.INT_PROPERTIES);
+            @SuppressWarnings("unchecked")
+            Map<Object, Object> intProperties = CompositeDataHelper.getTabularMap(cdata, CompositeDataConstants.INT_PROPERTIES);
             assertTrue("not empty", intProperties.size() > 0);
             assertEquals("counter in order", i, intProperties.get("counter"));
         }
@@ -1464,7 +1628,8 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
         for (int i = 0; i < messageCount - 4; i++) {
             CompositeData cdata = compdatalist[i];
 
-            Map intProperties = CompositeDataHelper.getTabularMap(cdata, CompositeDataConstants.INT_PROPERTIES);
+            @SuppressWarnings("unchecked")
+            Map<Object, Object> intProperties = CompositeDataHelper.getTabularMap(cdata, CompositeDataConstants.INT_PROPERTIES);
             assertTrue("not empty", intProperties.size() > 0);
             assertEquals("counter in order", i + 5, intProperties.get("counter"));
             echo("Got: " + intProperties.get("counter"));
@@ -1476,7 +1641,7 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
         ObjectName brokerName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost");
         BrokerViewMBean brokerView = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, brokerName, BrokerViewMBean.class, true);
 
-        Map connectors = brokerView.getTransportConnectors();
+        Map<String, String> connectors = brokerView.getTransportConnectors();
         LOG.info("Connectors: " + connectors);
         assertEquals("one connector", 1, connectors.size());
 
@@ -1506,7 +1671,7 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
         assertNotNull(connector);
 
         assertFalse(connector.isRebalanceClusterClients());
-        assertFalse(connector.isUpdateClusterClientsOnRemove());
+        assertTrue(connector.isUpdateClusterClientsOnRemove());
         assertFalse(connector.isUpdateClusterClients());
         assertFalse(connector.isAllowLinkStealingEnabled());
     }
@@ -1656,13 +1821,7 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
 
         ObjectName topicObjName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Topic,destinationName=test.topic");
         final TopicViewMBean topicView = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, topicObjName, TopicViewMBean.class, true);
-
-        assertEquals(1, topicView.getEnqueueCount());
-        assertEquals(4, topicView.getDispatchCount());
-        assertEquals(4, topicView.getInFlightCount());
-        assertEquals(0, topicView.getDequeueCount());
-
-        ArrayList<SubscriptionViewMBean> subscriberViews = new ArrayList();
+        ArrayList<SubscriptionViewMBean> subscriberViews = new ArrayList<SubscriptionViewMBean>();
         for (ObjectName name : topicView.getSubscriptions()) {
             subscriberViews.add(MBeanServerInvocationHandler.newProxyInstance(mbeanServer, name, SubscriptionViewMBean.class, true));
         }
@@ -1688,6 +1847,91 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
             }
         });
 
+        for (SubscriptionViewMBean subscriberView : subscriberViews) {
+            assertEquals(1, subscriberView.getEnqueueCounter());
+            assertEquals(1, subscriberView.getDispatchedCounter());
+            assertEquals(1, subscriberView.getDequeueCounter());
+        }
+
+        for (SubscriptionViewMBean subscriberView : subscriberViews) {
+            subscriberView.resetStatistics();
+        }
+
+        for (SubscriptionViewMBean subscriberView : subscriberViews) {
+            assertEquals(0, subscriberView.getEnqueueCounter());
+            assertEquals(0, subscriberView.getDispatchedCounter());
+            assertEquals(0, subscriberView.getDequeueCounter());
+        }
+    }
+
+    public void testSubscriptionView() throws Exception {
+        connection = connectionFactory.createConnection();
+        connection.setClientID("test");
+        Session session = connection.createSession(false, Session.CLIENT_ACKNOWLEDGE);
+        connection.start();
+
+        Topic singleTopic = session.createTopic("test.topic");
+        Topic wildcardTopic = session.createTopic("test.>");
+
+        TopicSubscriber durable1 = session.createDurableSubscriber(singleTopic, "single");
+        TopicSubscriber durable2 = session.createDurableSubscriber(wildcardTopic, "wildcard");
+
+        MessageConsumer consumer1 = session.createConsumer(singleTopic);
+        MessageConsumer consumer2 = session.createConsumer(wildcardTopic);
+
+        final ArrayList<Message> messages = new ArrayList<>();
+
+        MessageListener listener = new MessageListener() {
+            @Override
+            public void onMessage(Message message) {
+                messages.add(message);
+            }
+        };
+
+        durable1.setMessageListener(listener);
+        durable2.setMessageListener(listener);
+        consumer1.setMessageListener(listener);
+        consumer2.setMessageListener(listener);
+
+        MessageProducer producer = session.createProducer(singleTopic);
+        producer.send(session.createTextMessage("test"));
+
+        Wait.waitFor(new Wait.Condition() {
+            @Override
+            public boolean isSatisified() throws Exception {
+                return messages.size() == 4;
+            }
+        });
+
+        ObjectName topicObjName = assertRegisteredObjectName(domain + ":type=Broker,brokerName=localhost,destinationType=Topic,destinationName=test.topic");
+        final TopicViewMBean topicView = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, topicObjName, TopicViewMBean.class, true);
+        ArrayList<SubscriptionViewMBean> subscriberViews = new ArrayList<SubscriptionViewMBean>();
+        for (ObjectName name : topicView.getSubscriptions()) {
+            subscriberViews.add(MBeanServerInvocationHandler.newProxyInstance(mbeanServer, name, SubscriptionViewMBean.class, true));
+        }
+
+        assertEquals(4, subscriberViews.size());
+
+        for (SubscriptionViewMBean subscriberView : subscriberViews) {
+            assertEquals(1, subscriberView.getEnqueueCounter());
+            assertEquals(1, subscriberView.getDispatchedCounter());
+            assertEquals(0, subscriberView.getDequeueCounter());
+        }
+
+        for (Message message : messages) {
+            try {
+                message.acknowledge();
+            } catch (JMSException ignore) {}
+        }
+
+        // Wait so that each subscription gets updated
+        Wait.waitFor(new Wait.Condition() {
+            @Override
+            public boolean isSatisified() throws Exception {
+                return topicView.getDequeueCount() == 4;
+            }
+        });
+
         assertEquals(1, topicView.getEnqueueCount());
         assertEquals(4, topicView.getDispatchCount());
         assertEquals(0, topicView.getInFlightCount());
@@ -1698,7 +1942,52 @@ public class MBeanTest extends EmbeddedBrokerTestSupport {
             assertEquals(1, subscriberView.getDispatchedCounter());
             assertEquals(1, subscriberView.getDequeueCounter());
         }
+    }
 
+    public void testSubscriptionViewProperties() throws Exception {
+        connection = createConnection();
+        connection.start();
 
+        Session session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+
+        Topic topic1 = session.createTopic("test.topic1?consumer.dispatchAsync=false&consumer.retroactive=true");
+        Topic topic2 = session.createTopic("test.topic2?consumer.dispatchAsync=true&consumer.retroactive=false&consumer.exclusive=true");
+        MessageConsumer consumer1 = session.createConsumer(topic1);
+        MessageConsumer consumer2 = session.createConsumer(topic2);
+
+        assertNotNull(consumer1);
+        assertNotNull(consumer2);
+
+        ObjectName topicObjName = assertRegisteredObjectName(
+            domain + ":type=Broker,brokerName=localhost,destinationType=Topic,destinationName=" + topic1.getTopicName());
+        final TopicViewMBean topic1View = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, topicObjName, TopicViewMBean.class, true);
+        ArrayList<SubscriptionViewMBean> subscriberViews = new ArrayList<SubscriptionViewMBean>();
+        for (ObjectName name : topic1View.getSubscriptions()) {
+            subscriberViews.add(MBeanServerInvocationHandler.newProxyInstance(mbeanServer, name, SubscriptionViewMBean.class, true));
+        }
+
+        assertEquals(1, subscriberViews.size());
+
+        SubscriptionViewMBean subscription = subscriberViews.get(0);
+
+        assertFalse(subscription.isDispatchAsync());
+        assertTrue(subscription.isRetroactive());
+        assertFalse(subscription.isExclusive());
+
+        topicObjName = assertRegisteredObjectName(
+            domain + ":type=Broker,brokerName=localhost,destinationType=Topic,destinationName=" + topic2.getTopicName());
+        final TopicViewMBean topic2View = MBeanServerInvocationHandler.newProxyInstance(mbeanServer, topicObjName, TopicViewMBean.class, true);
+        subscriberViews = new ArrayList<SubscriptionViewMBean>();
+        for (ObjectName name : topic2View.getSubscriptions()) {
+            subscriberViews.add(MBeanServerInvocationHandler.newProxyInstance(mbeanServer, name, SubscriptionViewMBean.class, true));
+        }
+
+        assertEquals(1, subscriberViews.size());
+
+        subscription = subscriberViews.get(0);
+
+        assertTrue(subscription.isDispatchAsync());
+        assertFalse(subscription.isRetroactive());
+        assertTrue(subscription.isExclusive());
     }
 }

@@ -46,6 +46,7 @@ import org.apache.activemq.protobuf.Buffer;
 import org.apache.activemq.store.AbstractMessageStore;
 import org.apache.activemq.store.MessageRecoveryListener;
 import org.apache.activemq.store.MessageStore;
+import org.apache.activemq.store.MessageStoreSubscriptionStatistics;
 import org.apache.activemq.store.PersistenceAdapter;
 import org.apache.activemq.store.TopicMessageStore;
 import org.apache.activemq.store.TransactionRecoveryListener;
@@ -413,6 +414,13 @@ public class TempKahaDBStore extends TempMessageDatabase implements PersistenceA
             return 0;
         }
 
+        private final MessageStoreSubscriptionStatistics stats = new MessageStoreSubscriptionStatistics(false);
+
+        @Override
+        public MessageStoreSubscriptionStatistics getMessageStoreSubStatistics() {
+            return stats;
+        }
+
         @Override
         public void recoverSubscription(String clientId, String subscriptionName, final MessageRecoveryListener listener) throws Exception {
             final String subscriptionKey = subscriptionKey(clientId, subscriptionName);
@@ -637,6 +645,13 @@ public class TempKahaDBStore extends TempMessageDatabase implements PersistenceA
     @Override
     public long getLastProducerSequenceId(ProducerId id) {
         return -1;
+    }
+
+    @Override
+    public void allowIOResumption() {
+        if (pageFile != null) {
+            pageFile.allowIOResumption();
+        }
     }
 
     @Override

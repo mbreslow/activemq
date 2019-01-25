@@ -30,6 +30,7 @@ import javax.net.SocketFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLEngineResult;
+import javax.net.ssl.SSLParameters;
 
 import org.apache.activemq.thread.TaskRunnerFactory;
 import org.apache.activemq.util.IOExceptionSupport;
@@ -89,6 +90,12 @@ public class AutoInitNioSSLTransport extends NIOSSLTransport {
                 sslEngine = sslContext.createSSLEngine();
             }
 
+            if (verifyHostName) {
+                SSLParameters sslParams = new SSLParameters();
+                sslParams.setEndpointIdentificationAlgorithm("HTTPS");
+                sslEngine.setSSLParameters(sslParams);
+            }
+
             sslEngine.setUseClientMode(false);
             if (enabledCipherSuites != null) {
                 sslEngine.setEnabledCipherSuites(enabledCipherSuites);
@@ -118,7 +125,7 @@ public class AutoInitNioSSLTransport extends NIOSSLTransport {
             sslEngine.beginHandshake();
             handshakeStatus = sslEngine.getHandshakeStatus();
             doHandshake();
-           // detectReadyState();
+
         } catch (Exception e) {
             try {
                 if(outputStream != null) {
@@ -133,21 +140,6 @@ public class AutoInitNioSSLTransport extends NIOSSLTransport {
     @Override
     protected void doOpenWireInit() throws Exception {
 
-    }
-
-
-    @Override
-    protected void finishHandshake() throws Exception {
-        if (handshakeInProgress) {
-            handshakeInProgress = false;
-            nextFrameSize = -1;
-
-            // Once handshake completes we need to ask for the now real sslSession
-            // otherwise the session would return 'SSL_NULL_WITH_NULL_NULL' for the
-            // cipher suite.
-            sslSession = sslEngine.getSession();
-
-        }
     }
 
     public SSLEngine getSslSession() {
@@ -179,6 +171,10 @@ public class AutoInitNioSSLTransport extends NIOSSLTransport {
             while (true) {
                 if (!plain.hasRemaining()) {
                     int readCount = secureRead(plain);
+
+                    if (readCount == 0) {
+                        break;
+                    }
 
                     // channel is closed, cleanup
                     if (readCount == -1) {

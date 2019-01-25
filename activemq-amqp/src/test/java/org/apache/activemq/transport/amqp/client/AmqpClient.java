@@ -21,7 +21,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.activemq.transport.amqp.client.util.ClientTcpTransport;
+import org.apache.activemq.transport.amqp.client.transport.NettyTransport;
+import org.apache.activemq.transport.amqp.client.transport.NettyTransportFactory;
 import org.apache.qpid.proton.amqp.Symbol;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,6 +38,9 @@ public class AmqpClient {
     private final String username;
     private final String password;
     private final URI remoteURI;
+    private String authzid;
+    private String mechanismRestriction;
+    private boolean traceFrames;
 
     private AmqpValidator stateInspector = new AmqpValidator();
     private List<Symbol> offeredCapabilities = Collections.emptyList();
@@ -91,28 +95,56 @@ public class AmqpClient {
             throw new IllegalArgumentException("Password must be null if user name value is null");
         }
 
-        ClientTcpTransport transport = new ClientTcpTransport(remoteURI);
+        NettyTransport transport = NettyTransportFactory.createTransport(remoteURI);
         AmqpConnection connection = new AmqpConnection(transport, username, password);
+
+        connection.setMechanismRestriction(mechanismRestriction);
+        connection.setAuthzid(authzid);
 
         connection.setOfferedCapabilities(getOfferedCapabilities());
         connection.setOfferedProperties(getOfferedProperties());
         connection.setStateInspector(getStateInspector());
+        connection.setTraceFrames(isTraceFrames());
 
         return connection;
     }
 
     /**
-     * @return the user name value given when connect was called, always null before connect.
+     * @return the user name value given when constructed.
      */
     public String getUsername() {
         return username;
     }
 
     /**
-     * @return the password value given when connect was called, always null before connect.
+     * @return the password value given when constructed.
      */
     public String getPassword() {
         return password;
+    }
+
+    /**
+     * @param authzid
+     *        The authzid used when authenticating (currently only with PLAIN)
+     */
+    public void setAuthzid(String authzid) {
+        this.authzid = authzid;
+    }
+
+    public String getAuthzid() {
+        return authzid;
+    }
+
+    /**
+     * @param mechanismRestriction
+     *        The mechanism to use when authenticating (if offered by the server)
+     */
+    public void setMechanismRestriction(String mechanismRestriction) {
+        this.mechanismRestriction = mechanismRestriction;
+    }
+
+    public String getMechanismRestriction() {
+        return mechanismRestriction;
     }
 
     /**
@@ -186,6 +218,24 @@ public class AmqpClient {
         }
 
         this.stateInspector = stateInspector;
+    }
+
+    /**
+     * @return the traceFrames setting for the client, true indicates frame tracing is on.
+     */
+    public boolean isTraceFrames() {
+        return traceFrames;
+    }
+
+    /**
+     * Controls whether connections created from this client object will log AMQP
+     * frames to a trace level logger or not.
+     *
+     * @param traceFrames
+     *      configure the trace frames option for the client created connections.
+     */
+    public void setTraceFrames(boolean traceFrames) {
+        this.traceFrames = traceFrames;
     }
 
     @Override

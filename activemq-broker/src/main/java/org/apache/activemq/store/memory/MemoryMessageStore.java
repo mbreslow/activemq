@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
@@ -18,26 +18,21 @@ package org.apache.activemq.store.memory;
 
 import java.io.IOException;
 import java.util.Collections;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Map.Entry;
 
 import org.apache.activemq.broker.ConnectionContext;
 import org.apache.activemq.command.ActiveMQDestination;
 import org.apache.activemq.command.Message;
 import org.apache.activemq.command.MessageAck;
 import org.apache.activemq.command.MessageId;
+import org.apache.activemq.store.AbstractMessageStore;
 import org.apache.activemq.store.IndexListener;
 import org.apache.activemq.store.MessageRecoveryListener;
-import org.apache.activemq.store.AbstractMessageStore;
 import org.apache.activemq.store.MessageStoreStatistics;
 
 /**
- * An implementation of {@link org.apache.activemq.store.MessageStore} which
- * uses a
- *
- *
+ * An implementation of {@link org.apache.activemq.store.MessageStore}
  */
 public class MemoryMessageStore extends AbstractMessageStore {
 
@@ -59,30 +54,18 @@ public class MemoryMessageStore extends AbstractMessageStore {
         synchronized (messageTable) {
             messageTable.put(message.getMessageId(), message);
             incMessageStoreStatistics(getMessageStoreStatistics(), message);
-        }
-        message.incrementReferenceCount();
-        message.getMessageId().setFutureOrSequenceLong(sequenceId++);
-        if (indexListener != null) {
-            indexListener.onAdd(new IndexListener.MessageContext(context, message, null));
+            message.incrementReferenceCount();
+            message.getMessageId().setFutureOrSequenceLong(sequenceId++);
+            if (indexListener != null) {
+                indexListener.onAdd(new IndexListener.MessageContext(context, message, null));
+            }
         }
     }
-
-    // public void addMessageReference(ConnectionContext context,MessageId
-    // messageId,long expirationTime,String messageRef)
-    // throws IOException{
-    // synchronized(messageTable){
-    // messageTable.put(messageId,messageRef);
-    // }
-    // }
 
     @Override
     public Message getMessage(MessageId identity) throws IOException {
         return messageTable.get(identity);
     }
-
-    // public String getMessageReference(MessageId identity) throws IOException{
-    // return (String)messageTable.get(identity);
-    // }
 
     @Override
     public void removeMessage(ConnectionContext context, MessageAck ack) throws IOException {
@@ -92,7 +75,7 @@ public class MemoryMessageStore extends AbstractMessageStore {
     public void removeMessage(MessageId msgId) throws IOException {
         synchronized (messageTable) {
             Message removed = messageTable.remove(msgId);
-            if( removed !=null ) {
+            if (removed != null) {
                 removed.decrementReferenceCount();
                 decMessageStoreStatistics(getMessageStoreStatistics(), removed);
             }
@@ -104,16 +87,10 @@ public class MemoryMessageStore extends AbstractMessageStore {
 
     @Override
     public void recover(MessageRecoveryListener listener) throws Exception {
-        // the message table is a synchronizedMap - so just have to synchronize
-        // here
+        // the message table is a synchronizedMap - so just have to synchronize here
         synchronized (messageTable) {
-            for (Iterator<Message> iter = messageTable.values().iterator(); iter.hasNext();) {
-                Object msg = iter.next();
-                if (msg.getClass() == MessageId.class) {
-                    listener.recoverMessageReference((MessageId)msg);
-                } else {
-                    listener.recoverMessage((Message)msg);
-                }
+            for (Message message : messageTable.values()) {
+                listener.recoverMessage(message);
             }
         }
     }
@@ -137,17 +114,14 @@ public class MemoryMessageStore extends AbstractMessageStore {
     public void recoverNextMessages(int maxReturned, MessageRecoveryListener listener) throws Exception {
         synchronized (messageTable) {
             boolean pastLackBatch = lastBatchId == null;
-            int count = 0;
-            for (Iterator iter = messageTable.entrySet().iterator(); iter.hasNext();) {
-                Map.Entry entry = (Entry)iter.next();
+            for (Map.Entry<MessageId, Message> entry : messageTable.entrySet()) {
                 if (pastLackBatch) {
-                    count++;
                     Object msg = entry.getValue();
-                    lastBatchId = (MessageId)entry.getKey();
+                    lastBatchId = entry.getKey();
                     if (msg.getClass() == MessageId.class) {
-                        listener.recoverMessageReference((MessageId)msg);
+                        listener.recoverMessageReference((MessageId) msg);
                     } else {
-                        listener.recoverMessage((Message)msg);
+                        listener.recoverMessage((Message) msg);
                     }
                 } else {
                     pastLackBatch = entry.getKey().equals(lastBatchId);
@@ -163,7 +137,13 @@ public class MemoryMessageStore extends AbstractMessageStore {
 
     @Override
     public void setBatch(MessageId messageId) {
-        lastBatchId = messageId;
+        synchronized (messageTable) {
+            if (messageTable.containsKey(messageId)) {
+                lastBatchId = messageId;
+            } else {
+                resetBatching();
+            }
+        }
     }
 
     @Override
@@ -171,7 +151,7 @@ public class MemoryMessageStore extends AbstractMessageStore {
         synchronized (messageTable) {
             Message original = messageTable.get(message.getMessageId());
 
-            //if can't be found then increment count, else remove old size
+            // if can't be found then increment count, else remove old size
             if (original == null) {
                 getMessageStoreStatistics().getMessageCount().increment();
             } else {
@@ -187,10 +167,8 @@ public class MemoryMessageStore extends AbstractMessageStore {
         synchronized (messageTable) {
             long size = 0;
             int count = 0;
-            for (Iterator<Message> iter = messageTable.values().iterator(); iter
-                    .hasNext();) {
-                Message msg = iter.next();
-                size += msg.getSize();
+            for (Message message : messageTable.values()) {
+                size += message.getSize();
             }
 
             getMessageStoreStatistics().reset();
@@ -212,5 +190,4 @@ public class MemoryMessageStore extends AbstractMessageStore {
             stats.getMessageSize().addSize(-message.getSize());
         }
     }
-
 }

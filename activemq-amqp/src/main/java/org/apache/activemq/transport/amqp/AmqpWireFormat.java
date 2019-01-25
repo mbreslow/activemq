@@ -32,24 +32,31 @@ import org.apache.activemq.util.ByteArrayOutputStream;
 import org.apache.activemq.util.ByteSequence;
 import org.apache.activemq.wireformat.WireFormat;
 import org.fusesource.hawtbuf.Buffer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class AmqpWireFormat implements WireFormat {
+
+    private static final Logger LOG = LoggerFactory.getLogger(AmqpWireFormat.class);
 
     public static final long DEFAULT_MAX_FRAME_SIZE = Long.MAX_VALUE;
     public static final int NO_AMQP_MAX_FRAME_SIZE = -1;
     public static final int DEFAULT_CONNECTION_TIMEOUT = 30000;
     public static final int DEFAULT_IDLE_TIMEOUT = 30000;
     public static final int DEFAULT_PRODUCER_CREDIT = 1000;
+    public static final boolean DEFAULT_ALLOW_NON_SASL_CONNECTIONS = false;
+    public static final int DEFAULT_ANQP_FRAME_SIZE = 128 * 1024;
 
     private static final int SASL_PROTOCOL = 3;
 
     private int version = 1;
     private long maxFrameSize = DEFAULT_MAX_FRAME_SIZE;
-    private int maxAmqpFrameSize = NO_AMQP_MAX_FRAME_SIZE;
+    private int maxAmqpFrameSize = DEFAULT_ANQP_FRAME_SIZE;
     private int connectAttemptTimeout = DEFAULT_CONNECTION_TIMEOUT;
     private int idelTimeout = DEFAULT_IDLE_TIMEOUT;
     private int producerCredit = DEFAULT_PRODUCER_CREDIT;
     private String transformer = InboundTransformer.TRANSFORMER_JMS;
+    private boolean allowNonSaslConnections = DEFAULT_ALLOW_NON_SASL_CONNECTIONS;
 
     private boolean magicRead = false;
     private ResetListener resetListener;
@@ -57,8 +64,6 @@ public class AmqpWireFormat implements WireFormat {
     public interface ResetListener {
         void onProtocolReset();
     }
-
-    private boolean allowNonSaslConnections = true;
 
     @Override
     public ByteSequence marshal(Object command) throws IOException {
@@ -121,21 +126,38 @@ public class AmqpWireFormat implements WireFormat {
      * Given an AMQP header validate that the AMQP magic is present and
      * if so that the version and protocol values align with what we support.
      *
+     * In the case where authentication occurs the client sends us two AMQP
+     * headers, the first being the SASL initial header which triggers the
+     * authentication process and then if that succeeds we should get a second
+     * AMQP header that does not contain the SASL protocol ID indicating the
+     * connection process should follow the normal path.  We validate that the
+     * header align with these expectations.
+     *
      * @param header
      *        the header instance received from the client.
+     * @param authenticated
+     *        has the client already authenticated already.
      *
      * @return true if the header is valid against the current WireFormat.
      */
-    public boolean isHeaderValid(AmqpHeader header) {
+    public boolean isHeaderValid(AmqpHeader header, boolean authenticated) {
         if (!header.hasValidPrefix()) {
+            LOG.trace("AMQP Header arrived with invalid prefix: {}", header);
             return false;
         }
 
-        if (!isAllowNonSaslConnections() && header.getProtocolId() != SASL_PROTOCOL) {
+        if (!(header.getProtocolId() == 0 || header.getProtocolId() == SASL_PROTOCOL)) {
+            LOG.trace("AMQP Header arrived with invalid protocol ID: {}", header);
+            return false;
+        }
+
+        if (!authenticated && !isAllowNonSaslConnections() && header.getProtocolId() != SASL_PROTOCOL) {
+            LOG.trace("AMQP Header arrived without SASL and server requires SASL: {}", header);
             return false;
         }
 
         if (header.getMajor() != 1 || header.getMinor() != 0 || header.getRevision() != 0) {
+            LOG.trace("AMQP Header arrived invalid version: {}", header);
             return false;
         }
 

@@ -26,6 +26,7 @@ import org.apache.activemq.broker.region.Destination;
 import org.apache.activemq.broker.region.MessageReference;
 import org.apache.activemq.broker.region.Region;
 import org.apache.activemq.broker.region.Subscription;
+import org.apache.activemq.broker.region.virtual.VirtualDestination;
 import org.apache.activemq.command.ActiveMQDestination;
 import org.apache.activemq.command.BrokerId;
 import org.apache.activemq.command.BrokerInfo;
@@ -51,7 +52,7 @@ public interface Broker extends Region, Service {
      * @param type
      * @return a Broker instance.
      */
-    Broker getAdaptor(Class type);
+    Broker getAdaptor(Class<?> type);
 
     /**
      * Get the id of the broker
@@ -383,7 +384,11 @@ public interface Broker extends Region, Service {
      * @param destination
      * @param usage
      */
-    void isFull(ConnectionContext context,Destination destination,Usage usage);
+    void isFull(ConnectionContext context,Destination destination,Usage<?> usage);
+
+    void virtualDestinationAdded(ConnectionContext context, VirtualDestination virtualDestination);
+
+    void virtualDestinationRemoved(ConnectionContext context, VirtualDestination virtualDestination);
 
     /**
      *  called when the broker becomes the master in a master/slave

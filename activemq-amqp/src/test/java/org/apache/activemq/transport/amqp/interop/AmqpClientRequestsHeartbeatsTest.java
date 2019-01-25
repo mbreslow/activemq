@@ -21,6 +21,8 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -32,13 +34,29 @@ import org.apache.activemq.transport.amqp.client.AmqpValidator;
 import org.apache.activemq.util.Wait;
 import org.apache.qpid.proton.engine.Connection;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameters;
 
 /**
  * Tests that cover broker behavior when the client requests heartbeats
  */
+@RunWith(Parameterized.class)
 public class AmqpClientRequestsHeartbeatsTest extends AmqpClientTestSupport {
 
-    private final int TEST_IDLE_TIMEOUT = 3000;
+    private final int TEST_IDLE_TIMEOUT = 1000;
+
+    @Parameters(name="connector={0}")
+    public static Collection<Object[]> data() {
+        return Arrays.asList(new Object[][] {
+            {"amqp", false},
+            {"amqp+ws", false},
+        });
+    }
+
+    public AmqpClientRequestsHeartbeatsTest(String connectorScheme, boolean secure) {
+        super(connectorScheme, secure);
+    }
 
     @Override
     protected String getAdditionalConfig() {
@@ -58,7 +76,7 @@ public class AmqpClientRequestsHeartbeatsTest extends AmqpClientTestSupport {
             }
         });
 
-        AmqpConnection connection = client.connect();
+        AmqpConnection connection = trackConnection(client.connect());
         assertNotNull(connection);
 
         connection.getStateInspector().assertValid();
@@ -73,7 +91,7 @@ public class AmqpClientRequestsHeartbeatsTest extends AmqpClientTestSupport {
         AmqpClient client = createAmqpClient();
         assertNotNull(client);
 
-        AmqpConnection connection = client.createConnection();
+        AmqpConnection connection = trackConnection(client.createConnection());
         connection.setIdleTimeout(TEST_IDLE_TIMEOUT);
         assertNotNull(connection);
 
@@ -88,7 +106,7 @@ public class AmqpClientRequestsHeartbeatsTest extends AmqpClientTestSupport {
         connection.connect();
 
         assertEquals(1, getProxyToBroker().getCurrentConnectionsCount());
-        assertFalse(disconnected.await(10, TimeUnit.SECONDS));
+        assertFalse(disconnected.await(5, TimeUnit.SECONDS));
         assertEquals(1, getProxyToBroker().getCurrentConnectionsCount());
 
         connection.close();

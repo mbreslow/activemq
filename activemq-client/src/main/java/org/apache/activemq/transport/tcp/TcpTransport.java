@@ -1,5 +1,5 @@
-/**
-gxfdgvdfg * Licensed to the Apache Software Foundation (ASF) under one or more
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
@@ -29,6 +29,7 @@ import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
+import java.security.cert.X509Certificate;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -51,12 +52,11 @@ import org.slf4j.LoggerFactory;
 
 /**
  * An implementation of the {@link Transport} interface using raw tcp/ip
- *
- * @author David Martin Clavo david(dot)martin(dot)clavo(at)gmail.com (logging improvement modifications)
- *
  */
 public class TcpTransport extends TransportThreadSupport implements Transport, Service, Runnable {
+
     private static final Logger LOG = LoggerFactory.getLogger(TcpTransport.class);
+
     protected final URI remoteLocation;
     protected final URI localLocation;
     protected final WireFormat wireFormat;
@@ -133,7 +133,7 @@ public class TcpTransport extends TransportThreadSupport implements Transport, S
     protected final AtomicReference<CountDownLatch> stoppedLatch = new AtomicReference<CountDownLatch>();
     protected volatile int receiveCounter;
 
-    private Map<String, Object> socketOptions;
+    protected Map<String, Object> socketOptions;
     private int soLinger = Integer.MIN_VALUE;
     private Boolean keepAlive;
     private Boolean tcpNoDelay;
@@ -453,8 +453,13 @@ public class TcpTransport extends TransportThreadSupport implements Transport, S
         }
 
         try {
-            sock.setReceiveBufferSize(socketBufferSize);
-            sock.setSendBufferSize(socketBufferSize);
+            //only positive values are legal
+            if (socketBufferSize > 0) {
+                sock.setReceiveBufferSize(socketBufferSize);
+                sock.setSendBufferSize(socketBufferSize);
+            } else {
+                LOG.warn("Socket buffer size was set to {}; Skipping this setting as the size must be a positive number.", socketBufferSize);
+            }
         } catch (SocketException se) {
             LOG.warn("Cannot set socket buffer size = " + socketBufferSize);
             LOG.debug("Cannot set socket buffer size. Reason: " + se.getMessage() + ". This exception is ignored.", se);
@@ -746,7 +751,17 @@ public class TcpTransport extends TransportThreadSupport implements Transport, S
         return true;
     }
 
+    @Override
     public WireFormat getWireFormat() {
         return wireFormat;
+    }
+
+    @Override
+    public X509Certificate[] getPeerCertificates() {
+        return null;
+    }
+
+    @Override
+    public void setPeerCertificates(X509Certificate[] certificates) {
     }
 }

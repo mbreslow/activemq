@@ -119,7 +119,6 @@ public class StompTestSupport {
     }
 
     public void startBroker() throws Exception {
-
         createBroker(true);
 
         XStreamBrokerContext context = new XStreamBrokerContext();

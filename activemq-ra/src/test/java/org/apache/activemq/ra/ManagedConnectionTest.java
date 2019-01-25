@@ -33,7 +33,9 @@ import javax.jms.TopicConnectionFactory;
 import javax.resource.ResourceException;
 import javax.resource.spi.ConnectionEvent;
 
+import org.apache.activemq.ActiveMQConnection;
 import org.apache.activemq.ActiveMQConnectionFactory;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -49,7 +51,6 @@ public class ManagedConnectionTest {
 
     @Before
     public void setUp() throws Exception {
-
         managedConnectionFactory = new ActiveMQManagedConnectionFactory();
         managedConnectionFactory.setServerUrl(DEFAULT_HOST);
         managedConnectionFactory.setUserName(ActiveMQConnectionFactory.DEFAULT_USER);
@@ -58,7 +59,13 @@ public class ManagedConnectionTest {
         connectionFactory = (ConnectionFactory)managedConnectionFactory.createConnectionFactory(connectionManager);
         connection = (ManagedConnectionProxy)connectionFactory.createConnection();
         managedConnection = connection.getManagedConnection();
+    }
 
+    @After
+    public void destroyManagedConnection() throws Exception {
+        if (managedConnection != null) {
+            managedConnection.destroy();
+        }
     }
 
     @Test(timeout = 60000)
@@ -97,7 +104,6 @@ public class ManagedConnectionTest {
         session.commit();
 
         assertTrue(test[0]);
-
     }
 
     @Test(timeout = 60000)
@@ -161,6 +167,36 @@ public class ManagedConnectionTest {
     }
 
     @Test(timeout = 60000)
+    public void testSetClientIdAfterCleanup() throws Exception {
+
+        connection.setClientID("test");
+        try {
+            connection.setClientID("test");
+            fail("Should have received JMSException");
+        } catch (JMSException e) {
+        }
+
+        ActiveMQConnection physicalConnection = (ActiveMQConnection) managedConnection.getPhysicalConnection();
+        try {
+            physicalConnection.setClientID("testTwo");
+            fail("Should have received JMSException");
+        } catch (JMSException e) {
+        }
+
+        // close the proxy
+        connection.close();
+
+        // can set the id on the physical connection again after cleanup
+        physicalConnection.setClientID("test3");
+
+        try {
+            physicalConnection.setClientID("test4");
+            fail("Should have received JMSException");
+        } catch (JMSException e) {
+        }
+    }
+
+    @Test(timeout = 60000)
     public void testSessionCloseIndependance() throws ResourceException, JMSException {
 
         Session session1 = connection.createSession(true, 0);
@@ -215,6 +251,7 @@ public class ManagedConnectionTest {
     public void testSamePropertiesButNotEqual() throws Exception {
         ManagedConnectionProxy newConnection = (ManagedConnectionProxy)connectionFactory.createConnection();
         assertNonEquality(managedConnection, newConnection.getManagedConnection());
+        newConnection.close();
     }
 
     private void assertEquality(ActiveMQManagedConnection leftCon, ActiveMQManagedConnection rightCon) {
